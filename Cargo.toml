@@ -1,0 +1,16 @@
+[package]
+name         = "toml_dom"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.70"
+description  = "TOML 1.1 library – read, modify, write"
+license      = "MIT"
+repository   = "https://github.com/kathrinmotzkus/toml_dom"
+readme       = "README.md"
+keywords     = ["toml", "config", "parser", "serializer", "dom"]
+categories   = ["config", "parser-implementations", "encoding"]
+exclude      = ["fuzz/", "README.de.md", "konzept.md"]
+
+[dependencies]
+indexmap = "2"
+chrono   = { version = "0.4", default-features = false, features = ["alloc"] }
