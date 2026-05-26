@@ -1236,15 +1236,23 @@ fn parse_time_str(s: &str, line: u32, col: u32) -> Result<LocalTime, TomlError> 
     }
     let minute = parse_digits(&s[3..5], line, col)? as u8;
 
-    // Check if seconds follow
+    // Check if seconds follow (TOML 1.1: seconds are optional)
     if bytes.len() <= 5 || bytes[5] != b':' {
-        // TOML 1.1: seconds optional
         return Ok(LocalTime {
             hour,
             minute,
             second: 0,
             nanosecond: 0,
         });
+    }
+
+    // A ':' at position 5 was found, so seconds must follow — need at least HH:MM:SS (8 bytes)
+    if bytes.len() < 8 {
+        return Err(TomlError::parse(
+            "invalid time: seconds field incomplete after ':'",
+            line,
+            col,
+        ));
     }
 
     let second = parse_digits(&s[6..8], line, col)? as u8;
