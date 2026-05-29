@@ -1,6 +1,6 @@
 [package]
 name         = "toml_dom"
-version      = "0.2.0"
+version      = "0.2.1"
 edition      = "2021"
 rust-version = "1.70"
 description  = "TOML 1.1 library – read, modify, write"
