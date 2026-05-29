@@ -862,6 +862,22 @@ cargo +nightly fuzz run fuzz_set_value
 
 ## Changelog {#changelog}
 
+### v0.3.2
+
+**Fuzz validation of v0.3.1** — no code changes, stability confirmation only.
+
+All three fuzz targets ran in parallel for 5 minutes each with no crashes:
+
+| Target | Runs |
+|---|---|
+| `fuzz_parse` | 1,612,099 |
+| `fuzz_roundtrip` | 107,142 |
+| `fuzz_set_value` | 211,087 |
+
+`fuzz_roundtrip` runs three full parse+serialize cycles per input — fewer runs than the other targets is expected behaviour.
+
+---
+
 ### v0.3.1
 
 **New methods on `Document`:**

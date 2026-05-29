@@ -153,8 +153,7 @@ pub enum ValueNode {
 }
 ```
 
-Für Arrays speichert `ArrayNode` das öffnende `[`, alle Elemente mit ihrer
-jeweiligen Einrückung, optionalen Kommas und dem schließenden `]`:
+Für Arrays speichert `ArrayNode` das öffnende `[`, alle Elemente mit ihrer jeweiligen Einrückung, optionalen Kommas und dem schließenden `]`:
 
 ``` rust
 pub struct ArrayNode {
@@ -172,9 +171,7 @@ pub struct ArrayElement {
 ```
 
 Inline-Tables folgen demselben Muster (`InlineTableNode` / `InlineEntry`).
-Durch diese rekursive Struktur kann `set_value` einzelne Einträge einer
-Inline-Table oder einzelne Array-Elemente chirurgisch ändern — der Rest der
-Formatierung bleibt byte-identisch erhalten.
+Durch diese rekursive Struktur kann `set_value` einzelne Einträge einer Inline-Table oder einzelne Array-Elemente chirurgisch ändern — der Rest der Formatierung bleibt byte-identisch erhalten.
 
 ### Datenmodell (`src/value.rs`)
 
@@ -371,8 +368,7 @@ doc.set_element(&["data", "ids"], 0, Value::Integer(999));
 ```
 
 `set_element` funktioniert nur für Arrays, die direkte Einträge im Dokument sind.
-Für Arrays innerhalb von Inline-Tables `set_value` mit String-Index verwenden:
-`doc.set_value(&["tbl", "arr", "0"], val)`.
+Für Arrays innerhalb von Inline-Tables `set_value` mit String-Index verwenden: `doc.set_value(&["tbl", "arr", "0"], val)`.
 
 #### Ändern — direkt über DOM
 
@@ -865,6 +861,22 @@ cargo +nightly fuzz run fuzz_set_value
 ------------------------------------------------------------------------
 
 ## Changelog {#changelog}
+
+### v0.3.2
+
+**Fuzzing-Validierung von v0.3.1** — keine Code-Änderungen, reine Stabilitätsbestätigung.
+
+Alle drei Fuzz-Targets liefen parallel für je 5 Minuten ohne Absturz:
+
+| Target | Runs |
+|---|---|
+| `fuzz_parse` | 1.612.099 |
+| `fuzz_roundtrip` | 107.142 |
+| `fuzz_set_value` | 211.087 |
+
+`fuzz_roundtrip` führt pro Eingabe drei vollständige Parse+Serialize-Zyklen durch — weniger Runs als die anderen Targets ist daher erwartetes Verhalten.
+
+------------------------------------------------------------------------
 
 ### v0.3.1
 
