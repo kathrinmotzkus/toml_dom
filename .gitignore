@@ -4,3 +4,4 @@ Cargo.lock
 .~lock.*
 crates.io.api
 konzept*.md
+.Rhistory
