@@ -139,11 +139,17 @@ fn serialize_from_items(doc: &Document) -> String {
     }
 
     // Append any DOM values added after parsing (not covered by items).
-    // Build covered set: all prefixes of item paths.
+    // Build covered set: all prefixes of item entry paths, plus all section paths
+    // (section headers were already output, so their tables must not be output again).
     let mut covered: HashSet<Vec<String>> = HashSet::new();
     for p in &item_paths {
         for len in 1..=p.len() {
             covered.insert(p[..len].to_vec());
+        }
+    }
+    for item in &doc.items {
+        if let DocumentItem::Section(s) = item {
+            covered.insert(s.path.clone());
         }
     }
     append_new_dom_values(&mut out, doc.root(), &covered, &inline_table_paths, &[]);
@@ -182,6 +188,11 @@ fn append_new_dom_values(
                 }
             }
             Value::Array(arr) if is_array_of_tables(arr) => {
+                // If the array path is covered (either via entry prefixes or a Section
+                // item), all its elements were already output — skip entirely.
+                if covered.contains(&path) {
+                    continue;
+                }
                 for (i, elem) in arr.iter().enumerate() {
                     let mut elem_path = path.clone();
                     elem_path.push(i.to_string());
@@ -228,6 +239,12 @@ fn path_to_header(path: &[String]) -> String {
 }
 
 /// Traverse a DOM path that may contain stringified array indices.
+///
+/// The traversal strategy is determined by what the current value IS,
+/// not by whether the path segment looks like a number.  A segment is used
+/// as an array index only when the current value is actually an `Array`;
+/// otherwise it is used as a table key.  This correctly handles table keys
+/// that happen to be digit strings (e.g. the `"6"` in `-.6.-`).
 pub(crate) fn lookup_path<'a>(root: &'a Table, path: &[String]) -> Option<&'a Value> {
     if path.is_empty() {
         return None;
@@ -238,16 +255,15 @@ pub(crate) fn lookup_path<'a>(root: &'a Table, path: &[String]) -> Option<&'a Va
     }
     let mut current = first;
     for seg in &path[1..] {
-        if let Ok(idx) = seg.parse::<usize>() {
-            match current {
-                Value::Array(arr) => current = arr.get(idx)?,
-                _ => return None,
+        match current {
+            Value::Array(arr) => {
+                let idx = seg.parse::<usize>().ok()?;
+                current = arr.get(idx)?;
             }
-        } else {
-            match current {
-                Value::Table(t) => current = t.get(seg)?,
-                _ => return None,
+            Value::Table(t) => {
+                current = t.get(seg)?;
             }
+            _ => return None,
         }
     }
     Some(current)

@@ -128,3 +128,29 @@ fn test_only_comment_roundtrip() {
 fn test_dotted_key_preserved() {
     roundtrip("a.b = 1\n");
 }
+
+#[test]
+fn test_roundtrip_idempotency_crash_1() {
+    let s = "-.6.-=3   #";
+    let doc = Document::parse(s).unwrap();
+    let s2 = doc.serialize();
+    eprintln!("s  = {:?}", s);
+    eprintln!("s2 = {:?}", s2);
+    let doc2 = Document::parse(&s2).unwrap();
+    let s3 = doc2.serialize();
+    eprintln!("s3 = {:?}", s3);
+    assert_eq!(s2, s3, "idempotency violated");
+}
+
+#[test]
+fn test_roundtrip_idempotency_debug() {
+    use crate::cst::DocumentItem;
+    let s = "-.6.-=3   #";
+    let doc = crate::document::Document::parse(s).unwrap();
+    eprintln!("items.len() = {}", doc.items().len());
+    for (i, item) in doc.items().iter().enumerate() {
+        eprintln!("item[{}] = {:?}", i, item);
+    }
+    let s2 = doc.serialize();
+    eprintln!("s2 = {:?}", s2);
+}
