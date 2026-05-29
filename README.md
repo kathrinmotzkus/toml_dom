@@ -1,8 +1,14 @@
+---
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
 # toml_dom
 
 A complete TOML 1.1 library in Rust for reading, editing, and writing TOML documents — with **format-preserving round-trip**.
 
----
+------------------------------------------------------------------------
 
 ## Why toml_dom?
 
@@ -18,39 +24,39 @@ A complete TOML 1.1 library in Rust for reading, editing, and writing TOML docum
 
 `toml_dom` targets applications that need to **programmatically read, modify, and write back** a TOML document — without serde derive macros, with full TOML 1.1 support, and while **exactly preserving** comments, formatting, and notation of all unmodified entries.
 
----
+------------------------------------------------------------------------
 
 ## Table of Contents
 
-- [What this library does](#what-this-library-does)
-- [How it works](#how-it-works)
-- [Adding to your project](#adding-to-your-project)
-- [Public API](#public-api)
-  - [Document](#document)
-  - [Table](#table)
-  - [Array](#array)
-  - [Value](#value)
-  - [Date and Time Types](#date-and-time-types)
-  - [Error Handling](#error-handling)
-  - [Serialization Options](#serialization-options)
-- [Extended Examples](#extended-examples)
-- [TOML 1.1 Features](#toml-11-features)
-- [Project Structure](#project-structure)
-- [Changelog](#changelog)
+-   [What this library does](#what-this-library-does)
+-   [How it works](#how-it-works)
+-   [Adding to your project](#adding-to-your-project)
+-   [Public API](#public-api)
+    -   [Document](#document)
+    -   [Table](#table)
+    -   [Array](#array)
+    -   [Value](#value)
+    -   [Date and Time Types](#date-and-time-types)
+    -   [Error Handling](#error-handling)
+    -   [Serialization Options](#serialization-options)
+-   [Extended Examples](#extended-examples)
+-   [TOML 1.1 Features](#toml-11-features)
+-   [Project Structure](#project-structure)
+-   [Changelog](#changelog)
 
----
+------------------------------------------------------------------------
 
-## What this library does
+## What this library does {#what-this-library-does}
 
 `toml_dom` implements the [TOML 1.1 specification](https://toml.io/en/v1.1.0) in full.
 It allows other Rust programs to:
 
-- Parse TOML documents from **strings, files, or any `Read` source**,
-- hold the document in memory as a **mutable data model**,
-- **read, modify, add, and delete** individual values,
-- serialize the data model back to **valid TOML text**,
-- while doing so **exactly preserving** comments, blank lines, string notation, number representations, and all other formatting of unmodified entries,
-- receive **precise error messages** with line and column numbers.
+-   Parse TOML documents from **strings, files, or any `Read` source**,
+-   hold the document in memory as a **mutable data model**,
+-   **read, modify, add, and delete** individual values,
+-   serialize the data model back to **valid TOML text**,
+-   while doing so **exactly preserving** comments, blank lines, string notation, number representations, and all other formatting of unmodified entries,
+-   receive **precise error messages** with line and column numbers.
 
 All ten TOML types are supported: `string`, `integer`, `float`, `boolean`, `offset-date-time`, `local-date-time`, `local-date`, `local-time`, `array`, `table`.
 
@@ -58,25 +64,25 @@ All ten TOML types are supported: `string`, `integer`, `float`, `boolean`, `offs
 
 What is preserved when a TOML file is parsed:
 
-| Feature | Example |
-|---|---|
-| Comments | `# database settings` |
-| Inline comments | `port = 8080  # default port` |
-| Blank lines between entries | structural spacing |
-| String notation | `'literal'`, `"""multiline"""` |
-| Number format | `0xFF`, `0o755`, `0b1010`, `1_000_000` |
-| Inline vs. block tables | `{ a = 1 }` vs. `[section]` |
-| Multiline arrays | indentation and line breaks |
-| Trailing commas | `[1, 2, 3,]` (TOML 1.1) |
-| Whitespace around `=` | `key  =  "value"` |
+| Feature                     | Example                                |
+|-----------------------------|----------------------------------------|
+| Comments                    | `# database settings`                  |
+| Inline comments             | `port = 8080  # default port`          |
+| Blank lines between entries | structural spacing                     |
+| String notation             | `'literal'`, `"""multiline"""`         |
+| Number format               | `0xFF`, `0o755`, `0b1010`, `1_000_000` |
+| Inline vs. block tables     | `{ a = 1 }` vs. `[section]`            |
+| Multiline arrays            | indentation and line breaks            |
+| Trailing commas             | `[1, 2, 3,]` (TOML 1.1)                |
+| Whitespace around `=`       | `key  =  "value"`                      |
 
----
+------------------------------------------------------------------------
 
-## How it works
+## How it works {#how-it-works}
 
 The library is built in four layers:
 
-```
+```         
 ┌──────────────────────────────────────────────────────┐
 │                  Public API                          │
 │    Document · Table · Array · Value                  │
@@ -108,7 +114,7 @@ This metadata is stored in a flat `Vec<DocumentItem>`.
 
 `DocumentItem` is the central enum of the CST layer:
 
-```rust
+``` rust
 pub enum DocumentItem {
     Entry {
         node: EntryNode,    // formatting metadata + recursive ValueNode
@@ -122,7 +128,7 @@ pub enum DocumentItem {
 `EntryNode` stores all formatting information for a single entry.
 Its core is `node: ValueNode`, which represents the value recursively with full formatting depth:
 
-```rust
+``` rust
 pub struct EntryNode {
     pub leading:  String,    // comments/blank lines before the key
     pub raw_key:  String,    // key as written in the source
@@ -135,7 +141,7 @@ pub struct EntryNode {
 
 `ValueNode` distinguishes three cases:
 
-```rust
+``` rust
 pub enum ValueNode {
     // Scalar: original source text + semantic value
     // raw = None → serializer regenerates in canonical form
@@ -149,7 +155,7 @@ pub enum ValueNode {
 
 For arrays, `ArrayNode` stores the opening `[`, all elements with their individual indentation, optional commas, and the closing `]`:
 
-```rust
+``` rust
 pub struct ArrayNode {
     pub open:     String,
     pub elements: Vec<ArrayElement>,
@@ -171,7 +177,7 @@ This recursive structure allows `set_value` to surgically modify individual entr
 
 The core is the `Value` enum:
 
-```rust
+``` rust
 pub enum Value {
     String(String),
     Integer(i64),
@@ -199,28 +205,27 @@ Walks the `Vec<DocumentItem>` in source order and recursively emits the stored o
 Only nodes whose `raw` was cleared to `None` by `Document::set_value` are regenerated — at any nesting depth.
 
 **Canonical DOM path** (programmatically created document, or `sort_keys`/`prefer_inline` set):\
-Traverses the DOM tree and produces TOML text by these rules:
-- Floats always include `.` or `e` (e.g. `1.0`, never `1`).
+Traverses the DOM tree and produces TOML text by these rules: - Floats always include `.` or `e` (e.g. `1.0`, never `1`).
 - Strings are emitted as basic strings `"…"`, special characters are escaped.
 - Keys containing characters outside `A-Za-z0-9_-` are quoted.
 - Nested tables appear as `[path]` headers.
 - Arrays of tables appear as `[[path]]` headers.
 - Very flat tables (≤ 4 entries, no sub-tables) are written as inline tables `{…}`.
 
----
+------------------------------------------------------------------------
 
-## Adding to your project
+## Adding to your project {#adding-to-your-project}
 
 ### 1. Dependency in `Cargo.toml`
 
-```toml
+``` toml
 [dependencies]
 toml_dom = "0.3"
 ```
 
 ### 2. Import in your source file
 
-```rust
+``` rust
 use toml_dom::{Document, Value, TomlError};
 use toml_dom::{Table, Array};
 use toml_dom::{LocalDate, LocalTime, LocalDateTime, OffsetDateTime};
@@ -229,13 +234,13 @@ use toml_dom::SerializeOptions;
 
 Or import everything at once with a glob import (recommended only for scripts/prototypes):
 
-```rust
+``` rust
 use toml_dom::*;
 ```
 
 ### 3. Minimal example
 
-```rust
+``` rust
 use toml_dom::{Document, Value};
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -248,18 +253,18 @@ fn main() -> Result<(), toml_dom::TomlError> {
 }
 ```
 
----
+------------------------------------------------------------------------
 
-## Public API
+## Public API {#public-api}
 
-### Document
+### Document {#document}
 
 `Document` is the central entry point.
 It holds the entire TOML document as a root `Table` and — for parsed documents — the `Vec<DocumentItem>` for format-preserving round-trip.
 
 #### Parsing
 
-```rust
+``` rust
 // From a &str
 let doc = Document::parse("key = \"value\"\n")?;
 
@@ -277,7 +282,7 @@ let doc = Document::parse_reader(reader)?;
 `Document::from_table` creates a document from a pre-built `Table` without parsing.
 Such documents contain no formatting metadata and always serialize to canonical TOML.
 
-```rust
+``` rust
 use toml_dom::{Document, Table, Value};
 
 let mut root = Table::new();
@@ -293,7 +298,7 @@ println!("{}", doc.serialize());
 `doc.get::<T>(key)` reads a value directly from the root table and returns `&T`.
 Returns `Err(TomlError)` if the key is absent or the type does not match.
 
-```rust
+``` rust
 let host: &String = doc.get::<String>("host")?;
 let port: &i64    = doc.get::<i64>("port")?;
 let debug: &bool  = doc.get::<bool>("debug")?;
@@ -306,7 +311,7 @@ Supported type parameters: `String`, `i64`, `f64`, `bool`, `LocalDate`, `LocalTi
 `doc.path("a.b.c")` navigates arbitrarily deep nested tables via a dot-separated string.
 Returns `Option<&Value>`.
 
-```rust
+``` rust
 // [server]
 // host = "example.com"
 if let Some(val) = doc.path("server.host") {
@@ -317,53 +322,61 @@ if let Some(val) = doc.path("server.host") {
 > **Note:** `path` splits the string at every `.`.
 > Keys that themselves contain a dot (e.g. `"google.com"` as a quoted key) must be accessed via `root().get_path_segments(&["site", "google.com"])`.
 
-#### Mutating — format-preserving (`set_value`)
+#### Mutating — format-preserving
 
-`Document::set_value` is the preferred mutation path for parsed documents.
-It navigates the `ValueNode` tree and marks the target node for regeneration — all surrounding formatting, comments, and notation are left untouched.
-Returns `true` if the path was found and updated.
+Three methods change values format-preservingly; all return `true` when the path was found and updated.
 
-**Scalar entry:**
+**`set_value(&[segments], value)`** — universal method for any path.
+The path is given as a slice of string literals to unambiguously distinguish keys from path separators — even when a key contains a literal dot.
 
-```rust
+``` rust
+// Scalar entry:
 // config.toml contains: port = 0x1F90  # hex: 8080
-let mut doc = Document::parse_file("config.toml")?;
-
 doc.set_value(&["port"], Value::Integer(9090));
-doc.write_file("config.toml")?;
 // Result: port = 9090  # hex: 8080
-// (comment preserved, old hex notation replaced by new value)
-```
 
-**Entry inside an inline table:**
-
-```rust
+// Entry inside an inline table:
 // File contains: addr = { host = 'localhost', port = 8080 }
 doc.set_value(&["addr", "port"], Value::Integer(9090));
 // Result: addr = { host = 'localhost', port = 9090 }
-// (literal string 'localhost' and inline structure preserved)
-```
 
-**Array element:**
-
-```rust
-// File contains: ids = [100, 200, 300]
-doc.set_value(&["ids", "1"], Value::Integer(999));
-// Result: ids = [100, 999, 300]
-```
-
-**Nested path inside a section:**
-
-```rust
+// Nested path inside a section:
 doc.set_value(&["server", "addr", "port"], Value::Integer(443));
 ```
+
+**`set_path(dotted, value)`** — shorthand for simple paths without dots in key names, mirroring `doc.path("a.b.c")`.
+
+``` rust
+doc.set_path("server.port", Value::Integer(443));
+// equivalent to: doc.set_value(&["server", "port"], Value::Integer(443))
+```
+
+> **Note:** `set_path` splits the string at every `.`.
+> Keys that contain a dot must be changed via `set_value` with explicit segments.
+
+**`set_element(path, index, value)`** — type-safe array element mutation.
+The index is `usize`, not a string literal like `"1"` in `set_value`.
+
+``` rust
+// File contains: ids = [100, 200, 300]
+doc.set_element(&["ids"], 1, Value::Integer(999));
+// Result: ids = [100, 999, 300]
+// Indentation, commas, and all other elements are preserved byte-for-byte.
+
+// Array inside a section:
+doc.set_element(&["data", "ids"], 0, Value::Integer(999));
+```
+
+`set_element` only works for arrays that are direct document entries.
+For arrays nested inside inline tables, use `set_value` with a stringified index:
+`doc.set_value(&["tbl", "arr", "0"], val)`.
 
 #### Mutating — directly via DOM
 
 `root_mut()` gives direct mutable access to the DOM tree.
 Changes made this way are reliably written to the output; formatting metadata for modified entries is not automatically updated.
 
-```rust
+``` rust
 // Insert or overwrite a value
 doc.root_mut().insert("debug", Value::Boolean(true));
 
@@ -381,7 +394,7 @@ doc.root_mut().remove("debug");
 
 #### Serializing and writing
 
-```rust
+``` rust
 // To string (default options, format-preserving for parsed documents)
 let toml_text: String = doc.serialize();
 
@@ -400,7 +413,7 @@ doc.write_file_with("output.toml", &opts)?;
 
 #### CST access
 
-```rust
+``` rust
 // Read the raw items list (for advanced use cases)
 for item in doc.items() {
     match item {
@@ -415,13 +428,13 @@ for item in doc.items() {
 }
 ```
 
----
+------------------------------------------------------------------------
 
-### Table
+### Table {#table}
 
 `Table` stores key-value pairs in insertion order.
 
-```rust
+``` rust
 use toml_dom::{Table, Value};
 
 let mut t = Table::new();
@@ -432,7 +445,7 @@ t.insert("port", Value::Integer(3000));
 #### Method overview
 
 | Method | Return type | Description |
-|---|---|---|
+|------------------------|------------------------|------------------------|
 | `contains_key("key")` | `bool` | Check whether key exists |
 | `get("key")` | `Option<&Value>` | Read a value |
 | `get_mut("key")` | `Option<&mut Value>` | Modify a value |
@@ -451,14 +464,14 @@ t.insert("port", Value::Integer(3000));
 | `len()` / `is_empty()` | `usize` / `bool` | Size |
 | `table["key"]` | `&Value` | Index operator (panics if absent) |
 
----
+------------------------------------------------------------------------
 
-### Array
+### Array {#array}
 
 `Array` is an ordered list of `Value` elements.
 TOML allows mixed element types.
 
-```rust
+``` rust
 use toml_dom::{Array, Value};
 
 let mut arr = Array::new();
@@ -475,26 +488,26 @@ let numbers: Vec<i64> = arr.as_typed::<i64>()?;
 
 #### Method overview
 
-| Method | Return type | Description |
-|---|---|---|
-| `get(i)` | `Option<&Value>` | Read an element |
-| `get_mut(i)` | `Option<&mut Value>` | Modify an element |
-| `push(val)` | — | Append to the end |
-| `insert(i, val)` | — | Insert at position |
-| `remove(i)` | `Value` | Remove an element |
-| `as_typed::<T>()` | `Result<Vec<T>>` | Convert homogeneous array |
-| `iter()` / `iter_mut()` | Iterator | Iteration |
-| `len()` / `is_empty()` | `usize` / `bool` | Size |
-| `arr[i]` | `&Value` | Index operator |
-| `for v in &arr` | — | `IntoIterator` support |
+| Method                  | Return type          | Description               |
+|-------------------------|----------------------|---------------------------|
+| `get(i)`                | `Option<&Value>`     | Read an element           |
+| `get_mut(i)`            | `Option<&mut Value>` | Modify an element         |
+| `push(val)`             | —                    | Append to the end         |
+| `insert(i, val)`        | —                    | Insert at position        |
+| `remove(i)`             | `Value`              | Remove an element         |
+| `as_typed::<T>()`       | `Result<Vec<T>>`     | Convert homogeneous array |
+| `iter()` / `iter_mut()` | Iterator             | Iteration                 |
+| `len()` / `is_empty()`  | `usize` / `bool`     | Size                      |
+| `arr[i]`                | `&Value`             | Index operator            |
+| `for v in &arr`         | —                    | `IntoIterator` support    |
 
----
+------------------------------------------------------------------------
 
-### Value
+### Value {#value}
 
 `Value` is the universal TOML value type enum.
 
-```rust
+``` rust
 use toml_dom::Value;
 
 let s = Value::String("Hello".into());
@@ -505,13 +518,13 @@ let b = Value::Boolean(true);
 
 **Query the type name** (useful for error messages):
 
-```rust
+``` rust
 let name: &str = val.type_name();  // "string", "integer", "float", …
 ```
 
 **Pattern matching:**
 
-```rust
+``` rust
 match val {
     Value::String(s)  => println!("string: {}", s),
     Value::Integer(n) => println!("integer: {}", n),
@@ -521,13 +534,13 @@ match val {
 }
 ```
 
----
+------------------------------------------------------------------------
 
-### Date and Time Types
+### Date and Time Types {#date-and-time-types}
 
 The library defines four structs because the Rust standard library has no timezone-free date/time types.
 
-```rust
+``` rust
 use toml_dom::{LocalDate, LocalTime, LocalDateTime, OffsetDateTime};
 
 let d: &LocalDate = doc.get::<LocalDate>("birthday")?;
@@ -543,33 +556,33 @@ if odt.is_utc() { println!("UTC time"); }
 
 **Display** in RFC 3339 format:
 
-```rust
+``` rust
 println!("{}", LocalDate { year: 2024, month: 3, day: 15 });  // "2024-03-15"
 println!("{}", LocalTime { hour: 14, minute: 30, second: 0, nanosecond: 0 });  // "14:30:00"
 ```
 
 **Conversion to/from `chrono`:**
 
-```rust
+``` rust
 let ld = LocalDate { year: 2024, month: 6, day: 1 };
 let naive: chrono::NaiveDate = ld.into();
 let back: LocalDate = naive.into();
 ```
 
-| toml_dom type | chrono type |
-|---|---|
-| `LocalDate` | `chrono::NaiveDate` |
-| `LocalTime` | `chrono::NaiveTime` |
-| `LocalDateTime` | `chrono::NaiveDateTime` |
+| toml_dom type    | chrono type                             |
+|------------------|-----------------------------------------|
+| `LocalDate`      | `chrono::NaiveDate`                     |
+| `LocalTime`      | `chrono::NaiveTime`                     |
+| `LocalDateTime`  | `chrono::NaiveDateTime`                 |
 | `OffsetDateTime` | `chrono::DateTime<chrono::FixedOffset>` |
 
----
+------------------------------------------------------------------------
 
-### Error Handling
+### Error Handling {#error-handling}
 
 All fallible operations return `Result<T, TomlError>`.
 
-```rust
+``` rust
 use toml_dom::{TomlError, TomlErrorKind};
 
 match Document::parse("invalid = \n") {
@@ -598,17 +611,17 @@ match Document::parse("invalid = \n") {
 
 `TomlError` implements `std::error::Error` and works with `anyhow`, `thiserror`, etc.:
 
-```rust
+``` rust
 use anyhow::Context;
 let doc = Document::parse_file("config.toml")
     .context("failed to read configuration file")?;
 ```
 
----
+------------------------------------------------------------------------
 
-### Serialization Options
+### Serialization Options {#serialization-options}
 
-```rust
+``` rust
 use toml_dom::SerializeOptions;
 
 let opts = SerializeOptions {
@@ -620,7 +633,7 @@ let opts = SerializeOptions {
 ```
 
 | Option | Default | Description |
-|---|---|---|
+|------------------------|------------------------|------------------------|
 | `sort_keys` | `false` | Sort keys alphabetically (forces canonical path) |
 | `prefer_inline` | `false` | Small tables as inline tables `{…}` (forces canonical path) |
 | `indent` | `"    "` | Indentation for nested tables (canonical path only) |
@@ -630,13 +643,13 @@ let opts = SerializeOptions {
 > Comments and formatting are lost in that case.
 > For format-preserving output, use `doc.serialize()` without options.
 
----
+------------------------------------------------------------------------
 
-## Extended Examples
+## Extended Examples {#extended-examples}
 
 ### Reading a configuration file
 
-```rust
+``` rust
 use toml_dom::{Document, Value};
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -656,7 +669,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ### Building a document programmatically
 
-```rust
+``` rust
 use toml_dom::{Document, Table, Array, Value};
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -683,7 +696,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ### Format-preserving edit and write-back
 
-```rust
+``` rust
 use toml_dom::{Document, Value};
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -712,7 +725,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ### Reading and writing back via the DOM path
 
-```rust
+``` rust
 use toml_dom::{Document, Value, SerializeOptions};
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -732,7 +745,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ### Reading an array of tables
 
-```toml
+``` toml
 # products.toml
 [[product]]
 name = "Hammer"
@@ -743,7 +756,7 @@ name = "Saw"
 price = 24.50
 ```
 
-```rust
+``` rust
 use toml_dom::{Document, Value, Array};
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -763,13 +776,13 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ### Keys with a dot in their name
 
-```toml
+``` toml
 # special.toml
 [site]
 "google.com" = true
 ```
 
-```rust
+``` rust
 use toml_dom::Document;
 
 fn main() -> Result<(), toml_dom::TomlError> {
@@ -783,12 +796,12 @@ fn main() -> Result<(), toml_dom::TomlError> {
 }
 ```
 
----
+------------------------------------------------------------------------
 
 ## TOML 1.1 Features
 
 | Feature | Example |
-|---|---|
+|------------------------------------|------------------------------------|
 | `\e` escape (U+001B, ESC) | `s = "\e[31m"` |
 | `\xHH` escape (up to U+00FF) | `s = "\x41"` → `"A"` |
 | Newlines in inline tables | `t = {\n  a = 1,\n  b = 2\n}` |
@@ -796,11 +809,11 @@ fn main() -> Result<(), toml_dom::TomlError> {
 | Optional seconds in time literals | `t = 14:30` (equivalent to `14:30:00`) |
 | Optional seconds in datetime literals | `dt = 2024-03-15T14:30Z` |
 
----
+------------------------------------------------------------------------
 
-## Project Structure
+## Project Structure {#project-structure}
 
-```
+```         
 rust/
 ├── Cargo.toml
 ├── README.md
@@ -833,21 +846,37 @@ rust/
 
 Run tests:
 
-```sh
+``` sh
 cargo test
 ```
 
 Fuzzing (requires Nightly + cargo-fuzz):
 
-```sh
+``` sh
 cargo +nightly fuzz run fuzz_parse
 cargo +nightly fuzz run fuzz_roundtrip
 cargo +nightly fuzz run fuzz_set_value
 ```
 
----
+------------------------------------------------------------------------
 
-## Changelog
+## Changelog {#changelog}
+
+### v0.3.1
+
+**New methods on `Document`:**
+
+- **`set_path(dotted: &str, value: Value) -> bool`** — shorthand for `set_value` that accepts a dot-separated path string (mirroring `doc.path("a.b.c")`).
+  Reduces boilerplate for simple paths.
+  Same limitation as `path()`: keys containing a dot must be changed via `set_value` with explicit segments.
+
+- **`set_element(path: &[&str], index: usize, value: Value) -> bool`** — type-safe array element mutation.
+  The index is `usize` instead of a string literal `"1"` as required by `set_value`.
+  Returns `false` when the path does not exist, is not an array, or the index is out of bounds.
+
+**Unchanged:** public API fully backwards-compatible with v0.3.0.
+
+---
 
 ### v0.3.0
 
@@ -858,27 +887,27 @@ This allowed inline tables and arrays to be emitted format-preservingly, but not
 
 From v0.3, every value is a `ValueNode` tree:
 
-- `ValueNode::Scalar` — scalar with original source text and semantic value
-- `ValueNode::Array(ArrayNode)` — array with per-element formatting (`ArrayElement`)
-- `ValueNode::InlineTable(InlineTableNode)` — inline table with per-entry formatting (`InlineEntry`)
+-   `ValueNode::Scalar` — scalar with original source text and semantic value
+-   `ValueNode::Array(ArrayNode)` — array with per-element formatting (`ArrayElement`)
+-   `ValueNode::InlineTable(InlineTableNode)` — inline table with per-entry formatting (`InlineEntry`)
 
 **`Document::set_value` now navigates the entire tree:**
 
-- `set_value(&["point", "x"], val)` for `point = { x = 1, y = 2 }` → changes only `x`, preserves `y`, braces, commas, and whitespace
-- `set_value(&["ids", "1"], val)` for `ids = [100, 200, 300]` → changes only element 1
-- Arbitrary depth: `set_value(&["server", "addr", "port"], val)` for `addr = { host = 'localhost', port = 8080 }` inside section `[server]`
+-   `set_value(&["point", "x"], val)` for `point = { x = 1, y = 2 }` → changes only `x`, preserves `y`, braces, commas, and whitespace
+-   `set_value(&["ids", "1"], val)` for `ids = [100, 200, 300]` → changes only element 1
+-   Arbitrary depth: `set_value(&["server", "addr", "port"], val)` for `addr = { host = 'localhost', port = 8080 }` inside section `[server]`
 
 **New public types** (in `src/cst.rs`, re-exported from the crate root):
 
-- `ValueNode` — recursive value enum (Scalar / Array / InlineTable)
-- `ArrayNode` — array with `open`, `elements: Vec<ArrayElement>`, `close`
-- `ArrayElement` — one array element with `leading`, `node`, `trailing`, `comma`
-- `InlineTableNode` — inline table with `open`, `entries: Vec<InlineEntry>`, `close`
-- `InlineEntry` — one inline table entry with `leading`, `raw_key`, `pre_eq`, `post_eq`, `node`, `trailing`, `comma`
+-   `ValueNode` — recursive value enum (Scalar / Array / InlineTable)
+-   `ArrayNode` — array with `open`, `elements: Vec<ArrayElement>`, `close`
+-   `ArrayElement` — one array element with `leading`, `node`, `trailing`, `comma`
+-   `InlineTableNode` — inline table with `open`, `entries: Vec<InlineEntry>`, `close`
+-   `InlineEntry` — one inline table entry with `leading`, `raw_key`, `pre_eq`, `post_eq`, `node`, `trailing`, `comma`
 
 **Breaking change:**
 
-- `EntryNode.raw_value: Option<String>` → `EntryNode.node: ValueNode`
+-   `EntryNode.raw_value: Option<String>` → `EntryNode.node: ValueNode`
 
 This is a breaking change for code that directly accesses `EntryNode.raw_value`.
 All other public types (`Value`, `Table`, `Array`, `FromValue`, all error types) are unchanged.
@@ -889,28 +918,28 @@ All other public types (`Value`, `Table`, `Array`, `FromValue`, all error types)
 Consequence: `set_value` on inline table entries returned `false` (key comparison `"x "` ≠ `"x"`).
 Fix: whitespace is correctly moved from `raw_key` into `pre_eq`.
 
----
+------------------------------------------------------------------------
 
 ### v0.2.1
 
 **Bug fixes** — found by the new fuzz targets (`fuzz_roundtrip`, `fuzz_set_value`):
 
-- **Idempotency broken for numeric keys** (`src/serializer.rs`): `lookup_path` incorrectly treated any path segment parseable as an integer (e.g. `"6"` in the key path `-.6.-`) as an array index — even when the current value was a table.
-  Consequence: the entry appeared deleted from the DOM; the serializer emitted duplicate section headers instead; the second serialize pass differed from the first.
-  Fix: the current value's type is checked first — array index access only for `Value::Array`.
+-   **Idempotency broken for numeric keys** (`src/serializer.rs`): `lookup_path` incorrectly treated any path segment parseable as an integer (e.g. `"6"` in the key path `-.6.-`) as an array index — even when the current value was a table.
+    Consequence: the entry appeared deleted from the DOM; the serializer emitted duplicate section headers instead; the second serialize pass differed from the first.
+    Fix: the current value's type is checked first — array index access only for `Value::Array`.
 
-- **Section paths unknown to the serializer** (`src/serializer.rs`): `append_new_dom_values` only knew entry paths from the items list, not section paths (`[table]`, `[[array]]`).
-  Consequence: tables already emitted via section items were re-emitted as new `[section]` headers; on re-parsing this triggered a duplicate-key error.
-  Fix: section paths are added to the `covered` set; the array-of-tables loop exits early when the array path itself is covered.
+-   **Section paths unknown to the serializer** (`src/serializer.rs`): `append_new_dom_values` only knew entry paths from the items list, not section paths (`[table]`, `[[array]]`).
+    Consequence: tables already emitted via section items were re-emitted as new `[section]` headers; on re-parsing this triggered a duplicate-key error.
+    Fix: section paths are added to the `covered` set; the array-of-tables loop exits early when the array path itself is covered.
 
 **New fuzz targets:**
 
-- `fuzz_roundtrip` — checks idempotency: `parse → serialize → re-parse → re-serialize` must be byte-identical
-- `fuzz_set_value` — checks mutation safety: `parse → set_value → serialize` must always produce valid TOML with the updated value
+-   `fuzz_roundtrip` — checks idempotency: `parse → serialize → re-parse → re-serialize` must be byte-identical
+-   `fuzz_set_value` — checks mutation safety: `parse → set_value → serialize` must always produce valid TOML with the updated value
 
 **Unchanged:** public API fully backwards-compatible with v0.2.0.
 
----
+------------------------------------------------------------------------
 
 ### v0.2.0
 
@@ -921,41 +950,41 @@ During serialization these raw texts are emitted directly, so comments, formatti
 
 **New public types** (in `src/cst.rs`, re-exported from the crate root):
 
-- `DocumentItem` — flat list of all source elements (entries, section headers, end of file)
-- `EntryNode` — formatting metadata for a key-value pair: `leading`, `raw_key`, `pre_eq`, `post_eq`, `raw_value`, `trailing`
-- `SectionNode` — section header `[…]` or `[[…]]` with `leading`, `raw`, `trailing`, `path`, `is_array`
+-   `DocumentItem` — flat list of all source elements (entries, section headers, end of file)
+-   `EntryNode` — formatting metadata for a key-value pair: `leading`, `raw_key`, `pre_eq`, `post_eq`, `raw_value`, `trailing`
+-   `SectionNode` — section header `[…]` or `[[…]]` with `leading`, `raw`, `trailing`, `path`, `is_array`
 
 **New methods on `Document`:**
 
-- `Document::set_value(&["path", "to", "key"], value)` — changes a value format-preservingly: only that value is regenerated, all other formatting is untouched
-- `Document::items() -> &[DocumentItem]` — read access to the CST items list
+-   `Document::set_value(&["path", "to", "key"], value)` — changes a value format-preservingly: only that value is regenerated, all other formatting is untouched
+-   `Document::items() -> &[DocumentItem]` — read access to the CST items list
 
 **Serializer behaviour:**
 
-- Parsed document without `sort_keys`/`prefer_inline` → format-preserving path (new)
-- `sort_keys: true` or `prefer_inline: true` → canonical DOM path (as in v0.1)
-- Programmatically created document → canonical DOM path (as in v0.1)
-- `trailing_newline` now only affects the canonical path; the format-preserving path reproduces the original line ending
+-   Parsed document without `sort_keys`/`prefer_inline` → format-preserving path (new)
+-   `sort_keys: true` or `prefer_inline: true` → canonical DOM path (as in v0.1)
+-   Programmatically created document → canonical DOM path (as in v0.1)
+-   `trailing_newline` now only affects the canonical path; the format-preserving path reproduces the original line ending
 
 **Bug fix:**
 
-- Crash in `parse_time_str` for incomplete seconds fields (e.g. `13:63:` with no following digits) — found by fuzzing
+-   Crash in `parse_time_str` for incomplete seconds fields (e.g. `13:63:` with no following digits) — found by fuzzing
 
 **Unchanged:**
 
 `Value`, `Table`, `Array`, `FromValue`, `TomlError`, `TomlErrorKind`, `SourceLocation` — fully backwards-compatible.
 
----
+------------------------------------------------------------------------
 
 ### v0.1.0
 
 Initial release:
 
-- Complete TOML 1.1 implementation (parser + serializer)
-- All ten TOML types
-- `IndexMap`-backed `Table` (insertion order preserved)
-- Chrono conversions for all four datetime types
-- Path access (`get_path`, `get_path_segments`) with support for dots in key names
-- `SerializeOptions` (key sorting, inline preference, indentation)
-- Precise error messages with line and column numbers
-- cargo-fuzz integration
+-   Complete TOML 1.1 implementation (parser + serializer)
+-   All ten TOML types
+-   `IndexMap`-backed `Table` (insertion order preserved)
+-   Chrono conversions for all four datetime types
+-   Path access (`get_path`, `get_path_segments`) with support for dots in key names
+-   `SerializeOptions` (key sorting, inline preference, indentation)
+-   Precise error messages with line and column numbers
+-   cargo-fuzz integration

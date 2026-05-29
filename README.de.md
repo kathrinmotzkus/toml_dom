@@ -325,46 +325,54 @@ if let Some(val) = doc.path("server.host") {
 > **Hinweis:** `path` teilt den String an jedem `.`.
 > Schlüssel, die selbst einen Punkt enthalten (z. B. `"google.com"` als quoted key), müssen mit `root().get_path_segments(&["site", "google.com"])` abgerufen werden.
 
-#### Ändern — format-erhaltend (`set_value`)
+#### Ändern — format-erhaltend
 
-`Document::set_value` ist der bevorzugte Mutationspfad bei geparsten Dokumenten.
-Er navigiert den `ValueNode`-Baum und markiert den Zielknoten zur Neugeneration — alle umgebenden Formatierungen, Kommentare und Schreibweisen bleiben unberührt.
-Gibt `true` zurück, wenn der Pfad gefunden und aktualisiert wurde.
+Drei Methoden ändern Werte format-erhaltend; alle geben `true` zurück, wenn der Pfad gefunden und aktualisiert wurde.
 
-**Skalarer Eintrag:**
+**`set_value(&[segments], value)`** — universelle Methode für beliebige Pfade.
+Der Pfad wird als Slice von String-Literalen übergeben, um Schlüssel mit Punkten eindeutig von Pfadtrennern unterscheiden zu können.
 
 ``` rust
+// Skalarer Eintrag:
 // config.toml enthält: port = 0x1F90  # Hex: 8080
-let mut doc = Document::parse_file("config.toml")?;
-
 doc.set_value(&["port"], Value::Integer(9090));
-doc.write_file("config.toml")?;
 // Ergebnis: port = 9090  # Hex: 8080
-// (Kommentar bleibt, Hex-Schreibweise der alten Zeile ist durch neue Zahl ersetzt)
-```
 
-**Eintrag in einer Inline-Table:**
-
-``` rust
+// Eintrag in einer Inline-Table:
 // Datei enthält: addr = { host = 'localhost', port = 8080 }
 doc.set_value(&["addr", "port"], Value::Integer(9090));
 // Ergebnis: addr = { host = 'localhost', port = 9090 }
-// (Literal-String 'localhost' und Inline-Struktur bleiben erhalten)
+
+// Verschachtelter Pfad in einem Abschnitt:
+doc.set_value(&["server", "addr", "port"], Value::Integer(443));
 ```
 
-**Element eines Arrays:**
+**`set_path(dotted, value)`** — Kurzform für einfache Pfade ohne Punkte in Schlüsseln, analog zu `doc.path("a.b.c")`.
+
+``` rust
+doc.set_path("server.port", Value::Integer(443));
+// entspricht: doc.set_value(&["server", "port"], Value::Integer(443))
+```
+
+> **Hinweis:** `set_path` teilt den String an jedem `.`.
+> Schlüssel, die selbst einen Punkt enthalten, müssen mit `set_value` und expliziten Segmenten geändert werden.
+
+**`set_element(path, index, value)`** — typsichere Array-Element-Mutation.
+Der Index wird als `usize` übergeben, nicht als String-Literal.
 
 ``` rust
 // Datei enthält: ids = [100, 200, 300]
-doc.set_value(&["ids", "1"], Value::Integer(999));
+doc.set_element(&["ids"], 1, Value::Integer(999));
 // Ergebnis: ids = [100, 999, 300]
+// Einrückung, Kommas und alle anderen Elemente bleiben byte-identisch erhalten.
+
+// Array in einem Abschnitt:
+doc.set_element(&["data", "ids"], 0, Value::Integer(999));
 ```
 
-**Verschachtelter Pfad in einem Abschnitt:**
-
-``` rust
-doc.set_value(&["server", "addr", "port"], Value::Integer(443));
-```
+`set_element` funktioniert nur für Arrays, die direkte Einträge im Dokument sind.
+Für Arrays innerhalb von Inline-Tables `set_value` mit String-Index verwenden:
+`doc.set_value(&["tbl", "arr", "0"], val)`.
 
 #### Ändern — direkt über DOM
 
@@ -857,6 +865,22 @@ cargo +nightly fuzz run fuzz_set_value
 ------------------------------------------------------------------------
 
 ## Changelog {#changelog}
+
+### v0.3.1
+
+**Neue Methoden auf `Document`:**
+
+-   **`set_path(dotted: &str, value: Value) -> bool`** — Kurzform für `set_value`, die einen Punkt-separierten Pfad-String akzeptiert (analog zu `doc.path("a.b.c")`).
+    Reduziert die Schreibarbeit bei einfachen Pfaden.
+    Gleiche Einschränkung wie `path()`: Schlüssel mit Punkt im Namen müssen via `set_value` mit expliziten Segmenten geändert werden.
+
+-   **`set_element(path: &[&str], index: usize, value: Value) -> bool`** — typsichere Array-Element-Mutation.
+    Der Index ist `usize` statt eines String-Literals `"1"` wie bei `set_value`.
+    Gibt `false` zurück, wenn der Pfad nicht existiert, kein Array ist oder der Index außerhalb liegt.
+
+**Nicht geändert:** Öffentliche API vollständig rückwärtskompatibel zu v0.3.0.
+
+------------------------------------------------------------------------
 
 ### v0.3.0
 
