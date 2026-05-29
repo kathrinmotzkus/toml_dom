@@ -1,8 +1,3 @@
----
-editor_options: 
-  markdown: 
-    wrap: sentence
----
 
 # toml_dom
 
@@ -46,7 +41,7 @@ A complete TOML 1.1 library in Rust for reading, editing, and writing TOML docum
 
 ------------------------------------------------------------------------
 
-## What this library does {#what-this-library-does}
+## What this library does
 
 `toml_dom` implements the [TOML 1.1 specification](https://toml.io/en/v1.1.0) in full.
 It allows other Rust programs to:
@@ -78,7 +73,7 @@ What is preserved when a TOML file is parsed:
 
 ------------------------------------------------------------------------
 
-## How it works {#how-it-works}
+## How it works
 
 The library is built in four layers:
 
@@ -214,7 +209,7 @@ Traverses the DOM tree and produces TOML text by these rules: - Floats always in
 
 ------------------------------------------------------------------------
 
-## Adding to your project {#adding-to-your-project}
+## Adding to your project
 
 ### 1. Dependency in `Cargo.toml`
 
@@ -255,9 +250,9 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ------------------------------------------------------------------------
 
-## Public API {#public-api}
+## Public API
 
-### Document {#document}
+### Document
 
 `Document` is the central entry point.
 It holds the entire TOML document as a root `Table` and — for parsed documents — the `Vec<DocumentItem>` for format-preserving round-trip.
@@ -430,7 +425,7 @@ for item in doc.items() {
 
 ------------------------------------------------------------------------
 
-### Table {#table}
+### Table
 
 `Table` stores key-value pairs in insertion order.
 
@@ -466,7 +461,7 @@ t.insert("port", Value::Integer(3000));
 
 ------------------------------------------------------------------------
 
-### Array {#array}
+### Array
 
 `Array` is an ordered list of `Value` elements.
 TOML allows mixed element types.
@@ -503,7 +498,7 @@ let numbers: Vec<i64> = arr.as_typed::<i64>()?;
 
 ------------------------------------------------------------------------
 
-### Value {#value}
+### Value
 
 `Value` is the universal TOML value type enum.
 
@@ -536,7 +531,7 @@ match val {
 
 ------------------------------------------------------------------------
 
-### Date and Time Types {#date-and-time-types}
+### Date and Time Types
 
 The library defines four structs because the Rust standard library has no timezone-free date/time types.
 
@@ -578,7 +573,7 @@ let back: LocalDate = naive.into();
 
 ------------------------------------------------------------------------
 
-### Error Handling {#error-handling}
+### Error Handling
 
 All fallible operations return `Result<T, TomlError>`.
 
@@ -619,7 +614,7 @@ let doc = Document::parse_file("config.toml")
 
 ------------------------------------------------------------------------
 
-### Serialization Options {#serialization-options}
+### Serialization Options
 
 ``` rust
 use toml_dom::SerializeOptions;
@@ -645,7 +640,7 @@ let opts = SerializeOptions {
 
 ------------------------------------------------------------------------
 
-## Extended Examples {#extended-examples}
+## Extended Examples
 
 ### Reading a configuration file
 
@@ -811,7 +806,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ------------------------------------------------------------------------
 
-## Project Structure {#project-structure}
+## Project Structure
 
 ```         
 rust/
@@ -860,7 +855,7 @@ cargo +nightly fuzz run fuzz_set_value
 
 ------------------------------------------------------------------------
 
-## Changelog {#changelog}
+## Changelog
 
 ### v0.3.2
 
