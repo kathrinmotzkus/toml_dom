@@ -117,7 +117,7 @@ Diese Metadaten werden in einer flachen `Vec<DocumentItem>` gespeichert.
 ``` rust
 pub enum DocumentItem {
     Entry {
-        node: EntryNode,    // Formatierungsmetadaten + Rohtexte
+        node: EntryNode,    // Formatierungsmetadaten + rekursiver ValueNode
         path: Vec<String>,  // DOM-Pfad für Lookup
     },
     Section(SectionNode),   // [header] oder [[array-of-tables]]
@@ -125,18 +125,56 @@ pub enum DocumentItem {
 }
 ```
 
-`EntryNode` speichert alle Formatierungsinformationen eines Eintrags:
+`EntryNode` speichert alle Formatierungsinformationen eines Eintrags.
+Das Herzstück ist `node: ValueNode`, der den Wert rekursiv mit voller Formatierungstiefe repräsentiert:
 
 ``` rust
 pub struct EntryNode {
-    pub leading:   String,         // Kommentare/Leerzeilen vor dem Schlüssel
-    pub raw_key:   String,         // Schlüssel im Originaltext
-    pub pre_eq:    String,         // Whitespace vor "="
-    pub post_eq:   String,         // Whitespace nach "="
-    pub raw_value: Option<String>, // Wert im Originaltext; None = neu generieren
-    pub trailing:  String,         // Inline-Kommentar + Zeilenende
+    pub leading:  String,    // Kommentare/Leerzeilen vor dem Schlüssel
+    pub raw_key:  String,    // Schlüssel im Originaltext
+    pub pre_eq:   String,    // Whitespace vor "="
+    pub post_eq:  String,    // Whitespace nach "="
+    pub node:     ValueNode, // Wert mit Formatierung (rekursiv)
+    pub trailing: String,    // Inline-Kommentar + Zeilenende
 }
 ```
+
+`ValueNode` unterscheidet drei Fälle:
+
+``` rust
+pub enum ValueNode {
+    // Skalar: originaler Quelltext + semantischer Wert
+    // raw = None → Serializer generiert kanonisch neu
+    Scalar { raw: Option<String>, value: Value },
+    // Array mit Formatierung pro Element
+    Array(ArrayNode),
+    // Inline-Table mit Formatierung pro Eintrag
+    InlineTable(InlineTableNode),
+}
+```
+
+Für Arrays speichert `ArrayNode` das öffnende `[`, alle Elemente mit ihrer
+jeweiligen Einrückung, optionalen Kommas und dem schließenden `]`:
+
+``` rust
+pub struct ArrayNode {
+    pub open:     String,
+    pub elements: Vec<ArrayElement>,
+    pub close:    String,           // Whitespace vor "]" + "]"
+}
+
+pub struct ArrayElement {
+    pub leading:  String,           // Whitespace/Kommentare vor dem Wert
+    pub node:     ValueNode,        // rekursiv
+    pub trailing: String,           // Whitespace nach dem Wert
+    pub comma:    Option<String>,   // "," falls vorhanden
+}
+```
+
+Inline-Tables folgen demselben Muster (`InlineTableNode` / `InlineEntry`).
+Durch diese rekursive Struktur kann `set_value` einzelne Einträge einer
+Inline-Table oder einzelne Array-Elemente chirurgisch ändern — der Rest der
+Formatierung bleibt byte-identisch erhalten.
 
 ### Datenmodell (`src/value.rs`)
 
@@ -166,8 +204,8 @@ pub enum Value {
 Der Serializer hat zwei Pfade:
 
 **Format-erhaltender Pfad** (geparstes Dokument, kein `sort_keys`/`prefer_inline`):\
-Läuft die `Vec<DocumentItem>` in Quellreihenfolge durch und gibt für jeden Eintrag den gespeicherten Originaltext aus.
-Nur Einträge, deren `raw_value` durch `Document::set_value` geleert wurde, werden neu generiert.
+Läuft die `Vec<DocumentItem>` in Quellreihenfolge durch und emittiert rekursiv den gespeicherten Originaltext jedes `ValueNode`.
+Nur Knoten, deren `raw` durch `Document::set_value` auf `None` gesetzt wurde, werden neu generiert — auf jeder Verschachtelungsebene.
 
 **Kanonischer DOM-Pfad** (programmatisch erstelltes Dokument, oder `sort_keys`/`prefer_inline` gesetzt):\
 Traversiert den DOM-Baum und erzeugt TOML-Text nach folgenden Regeln: - Floats erhalten immer `.` oder `e` (z. B. `1.0`, nie `1`).
@@ -185,7 +223,7 @@ Traversiert den DOM-Baum und erzeugt TOML-Text nach folgenden Regeln: - Floats e
 
 ``` toml
 [dependencies]
-toml_dom = "0.2"
+toml_dom = "0.3"
 ```
 
 ### 2. In der Quelldatei importieren
@@ -290,24 +328,42 @@ if let Some(val) = doc.path("server.host") {
 #### Ändern — format-erhaltend (`set_value`)
 
 `Document::set_value` ist der bevorzugte Mutationspfad bei geparsten Dokumenten.
-Er aktualisiert sowohl den DOM-Baum als auch die Formatierungsliste: der `raw_value` des betreffenden Eintrags wird geleert, sodass der Serializer genau diesen einen Wert neu generiert — alle anderen Einträge bleiben unberührt.
+Er navigiert den `ValueNode`-Baum und markiert den Zielknoten zur Neugeneration — alle umgebenden Formatierungen, Kommentare und Schreibweisen bleiben unberührt.
+Gibt `true` zurück, wenn der Pfad gefunden und aktualisiert wurde.
+
+**Skalarer Eintrag:**
 
 ``` rust
-// config.toml enthält: port = 8080  # Standard-Port
+// config.toml enthält: port = 0x1F90  # Hex: 8080
 let mut doc = Document::parse_file("config.toml")?;
 
-// Ändert den Wert, bewahrt Kommentar und alle anderen Formatierungen
-let ok = doc.set_value(&["port"], Value::Integer(9090));
-assert!(ok);  // false, wenn der Pfad nicht existiert
-
+doc.set_value(&["port"], Value::Integer(9090));
 doc.write_file("config.toml")?;
-// Ergebnis: port = 9090  # Standard-Port
+// Ergebnis: port = 9090  # Hex: 8080
+// (Kommentar bleibt, Hex-Schreibweise der alten Zeile ist durch neue Zahl ersetzt)
 ```
 
-Für verschachtelte Pfade:
+**Eintrag in einer Inline-Table:**
 
 ``` rust
-doc.set_value(&["server", "port"], Value::Integer(443));
+// Datei enthält: addr = { host = 'localhost', port = 8080 }
+doc.set_value(&["addr", "port"], Value::Integer(9090));
+// Ergebnis: addr = { host = 'localhost', port = 9090 }
+// (Literal-String 'localhost' und Inline-Struktur bleiben erhalten)
+```
+
+**Element eines Arrays:**
+
+``` rust
+// Datei enthält: ids = [100, 200, 300]
+doc.set_value(&["ids", "1"], Value::Integer(999));
+// Ergebnis: ids = [100, 999, 300]
+```
+
+**Verschachtelter Pfad in einem Abschnitt:**
+
+``` rust
+doc.set_value(&["server", "addr", "port"], Value::Integer(443));
 ```
 
 #### Ändern — direkt über DOM
@@ -384,7 +440,7 @@ t.insert("port", Value::Integer(3000));
 #### Methoden im Überblick
 
 | Methode | Rückgabe | Beschreibung |
-|---------------------|-----------------------|-----------------------------|
+|----|----|----|
 | `contains_key("key")` | `bool` | Prüft ob Schlüssel vorhanden |
 | `get("key")` | `Option<&Value>` | Wert lesen |
 | `get_mut("key")` | `Option<&mut Value>` | Wert ändern |
@@ -573,7 +629,7 @@ let opts = SerializeOptions {
 ```
 
 | Option | Standard | Beschreibung |
-|-------------------|-----------------------|------------------------------|
+|----|----|----|
 | `sort_keys` | `false` | Schlüssel alphabetisch sortieren (erzwingt kanonischen Pfad) |
 | `prefer_inline` | `false` | Kleine Tables als Inline-Tables `{…}` (erzwingt kanonischen Pfad) |
 | `indent` | `"    "` | Einrückung für verschachtelte Tables (nur kanonischer Pfad) |
@@ -741,7 +797,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 ## TOML-1.1-Besonderheiten
 
 | Neuerung | Beispiel |
-|--------------------------------------|----------------------------------|
+|----|----|
 | `\e` Escape (U+001B, ESC) | `s = "\e[31m"` |
 | `\xHH` Escape (bis U+00FF) | `s = "\x41"` → `"A"` |
 | Zeilenumbrüche in Inline-Tables | `t = {\n  a = 1,\n  b = 2\n}` |
@@ -802,17 +858,57 @@ cargo +nightly fuzz run fuzz_set_value
 
 ## Changelog {#changelog}
 
+### v0.3.0
+
+**Hauptfeature: Rekursiver `ValueNode` — Inline-Tables und Arrays nicht mehr opak**
+
+Bisher speicherte `EntryNode` den gesamten Wert eines Eintrags als einzigen Rohtext-String (`raw_value: Option<String>`).
+Damit konnten Inline-Tables und Arrays zwar format-erhaltend ausgegeben, aber nicht chirurgisch geändert werden.
+
+Ab v0.3 ist jeder Wert ein `ValueNode`-Baum:
+
+-   `ValueNode::Scalar` — Skalar mit Originaltext und semantischem Wert
+-   `ValueNode::Array(ArrayNode)` — Array mit Formatierung pro Element (`ArrayElement`)
+-   `ValueNode::InlineTable(InlineTableNode)` — Inline-Table mit Formatierung pro Eintrag (`InlineEntry`)
+
+**`Document::set_value` navigiert jetzt den gesamten Baum:**
+
+-   `set_value(&["point", "x"], val)` für `point = { x = 1, y = 2 }` → ändert nur `x`, bewahrt `y`, Klammern, Kommas und Whitespace
+-   `set_value(&["ids", "1"], val)` für `ids = [100, 200, 300]` → ändert nur Element 1
+-   Beliebige Tiefe: `set_value(&["server", "addr", "port"], val)` für `addr = { host = 'localhost', port = 8080 }` in Sektion `[server]`
+
+**Neue öffentliche Typen** (in `src/cst.rs`, re-exportiert):
+
+-   `ValueNode` — rekursives Wert-Enum (Scalar / Array / InlineTable)
+-   `ArrayNode` — Array mit `open`, `elements: Vec<ArrayElement>`, `close`
+-   `ArrayElement` — ein Array-Element mit `leading`, `node`, `trailing`, `comma`
+-   `InlineTableNode` — Inline-Table mit `open`, `entries: Vec<InlineEntry>`, `close`
+-   `InlineEntry` — ein Inline-Table-Eintrag mit `leading`, `raw_key`, `pre_eq`, `post_eq`, `node`, `trailing`, `comma`
+
+**Geänderter Typ:**
+
+-   `EntryNode.raw_value: Option<String>` → `EntryNode.node: ValueNode`
+
+Dies ist eine Breaking Change für Code, der direkt auf `EntryNode.raw_value` zugreift.
+Die übrigen öffentlichen Typen (`Value`, `Table`, `Array`, `FromValue`, alle Fehlertypen) bleiben unverändert.
+
+**Bugfix im Parser:**
+
+`raw_key` enthielt fälschlicherweise den Whitespace, den `parse_key` intern beim Suchen nach einem Punkt konsumiert.
+Folge: `set_value` auf Inline-Table-Einträge scheiterte mit `false` (Schlüsselvergleich `"x "` ≠ `"x"`).
+Fix: Whitespace wird korrekt von `raw_key` nach `pre_eq` verschoben.
+
+------------------------------------------------------------------------
+
 ### v0.2.1
 
 **Bugfixes** — durch neue Fuzz-Targets (`fuzz_roundtrip`, `fuzz_set_value`) gefunden:
 
--   **Idempotenz gebrochen bei numerischen Schlüsseln** (`src/serializer.rs`):
-    `lookup_path` interpretierte jeden Pfadsegment, der als Zahl parsbar ist (z. B. `"6"` im Schlüsselpfad `-.6.-`), fälschlicherweise als Array-Index — auch wenn der aktuelle Wert eine Table war.
+-   **Idempotenz gebrochen bei numerischen Schlüsseln** (`src/serializer.rs`): `lookup_path` interpretierte jeden Pfadsegment, der als Zahl parsbar ist (z. B. `"6"` im Schlüsselpfad `-.6.-`), fälschlicherweise als Array-Index — auch wenn der aktuelle Wert eine Table war.
     Folge: Der Eintrag galt als im DOM gelöscht, der Serializer gab stattdessen doppelte Section-Header aus, der zweite Serialize-Schritt wich vom ersten ab.
     Fix: Typ des aktuellen Werts wird zuerst geprüft — Array-Index-Zugriff nur bei `Value::Array`.
 
--   **Section-Pfade dem Serializer unbekannt** (`src/serializer.rs`):
-    `append_new_dom_values` kannte nur Entry-Pfade aus der Items-Liste, nicht aber Section-Pfade (`[table]`, `[[array]]`).
+-   **Section-Pfade dem Serializer unbekannt** (`src/serializer.rs`): `append_new_dom_values` kannte nur Entry-Pfade aus der Items-Liste, nicht aber Section-Pfade (`[table]`, `[[array]]`).
     Folge: Bereits über Section-Items ausgegebene Tables wurden ein zweites Mal als neue `[section]`-Header ausgegeben; beim Re-Parsen löste das einen Duplicate-Key-Fehler aus.
     Fix: Section-Pfade werden dem `covered`-Set hinzugefügt; die Array-of-Tables-Schleife bricht ab, wenn der Array-Pfad selbst gedeckt ist.
 
