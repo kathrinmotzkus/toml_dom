@@ -1,6 +1,6 @@
 # toml_dom
 
-Eine vollständige TOML-1.1-Library in Rust zum Lesen, Bearbeiten und Schreiben von TOML-Dokumenten.
+Eine vollständige TOML-1.1-Library in Rust zum Lesen, Bearbeiten und Schreiben von TOML-Dokumenten — mit **format-erhaltendem Roundtrip**.
 
 ---
 
@@ -10,12 +10,13 @@ Eine vollständige TOML-1.1-Library in Rust zum Lesen, Bearbeiten und Schreiben 
 |---|---|---|---|
 | TOML-Version | 1.0 | 1.0 | **1.1** |
 | Daten lesen | ✓ (via serde) | ✓ | ✓ |
-| Daten ändern | ✗ | ✓ (format-erhaltend) | ✓ |
+| Daten ändern | ✗ | ✓ (format-erhaltend) | **✓ (format-erhaltend)** |
+| Format-erhaltender Roundtrip | ✗ | ✓ | **✓** |
 | Mutabler DOM ohne serde | ✗ | eingeschränkt | **✓** |
 | Gezielter Pfadzugriff | ✗ | ✗ | **✓** |
 | Keine serde-Abhängigkeit | ✗ | ✗ | **✓** |
 
-`toml_dom` richtet sich an Anwendungen, die ein TOML-Dokument **programmatisch lesen, verändern und zurückschreiben** müssen — ohne serde-Derive-Makros und mit voller TOML-1.1-Unterstützung.
+`toml_dom` richtet sich an Anwendungen, die ein TOML-Dokument **programmatisch lesen, verändern und zurückschreiben** müssen — ohne serde-Derive-Makros, mit voller TOML-1.1-Unterstützung, und dabei Kommentare, Formatierungen und Schreibweisen aller unveränderten Einträge **exakt erhalten**.
 
 ---
 
@@ -35,6 +36,7 @@ Eine vollständige TOML-1.1-Library in Rust zum Lesen, Bearbeiten und Schreiben 
 - [Ausführliche Beispiele](#ausführliche-beispiele)
 - [TOML-1.1-Besonderheiten](#toml-11-besonderheiten)
 - [Projektstruktur](#projektstruktur)
+- [Changelog](#changelog)
 
 ---
 
@@ -46,40 +48,86 @@ Eine vollständige TOML-1.1-Library in Rust zum Lesen, Bearbeiten und Schreiben 
 - das Dokument im Speicher als **veränderliches Datenmodell** zu halten,
 - einzelne Werte zu **lesen, ändern, hinzufügen und löschen**,
 - das Datenmodell wieder als **validen TOML-Text** zu serialisieren,
+- dabei **Kommentare, Leerzeilen, String-Schreibweisen, Zahlendarstellungen** und sonstige Formatierungen aller nicht veränderten Einträge **exakt zu erhalten**,
 - **präzise Fehlermeldungen** mit Zeile und Spalte zu erhalten.
 
 Alle zehn TOML-Typen werden unterstützt: `string`, `integer`, `float`, `boolean`, `offset-date-time`, `local-date-time`, `local-date`, `local-time`, `array`, `table`.
+
+### Format-erhaltender Roundtrip
+
+Was beim Einlesen einer TOML-Datei erhalten bleibt:
+
+| Merkmal | Beispiel |
+|---------|---------|
+| Kommentare | `# Datenbankeinstellungen` |
+| Inline-Kommentare | `port = 8080  # Standard-Port` |
+| Leerzeilen zwischen Einträgen | strukturgebende Abstände |
+| String-Schreibweise | `'literal'`, `"""mehrzeilig"""` |
+| Zahlenformat | `0xFF`, `0o755`, `0b1010`, `1_000_000` |
+| Inline- vs. Block-Tables | `{ a = 1 }` vs. `[section]` |
+| Mehrzeilige Arrays | Einrückung und Zeilenumbrüche |
+| Trailing commas | `[1, 2, 3,]` (TOML 1.1) |
+| Whitespace um `=` | `key  =  "wert"` |
 
 ---
 
 ## Wie sie es macht
 
-Die Library ist in drei Schichten aufgebaut:
+Die Library ist in vier Schichten aufgebaut:
 
 ```
 ┌──────────────────────────────────────────────────────┐
 │               Öffentliche API                        │
 │    Document · Table · Array · Value                  │
-└──────────────┬───────────────────────┬───────────────┘
-               │                       │
-       ┌───────▼──────┐       ┌────────▼───────┐
-       │    Parser    │       │   Serializer   │
-       └───────┬──────┘       └────────────────┘
-               │
-       ┌───────▼──────┐
-       │    Source    │
-       │  (&str-Scan) │
+└──────────────┬────────────────────────┬──────────────┘
+               │                        │
+       ┌───────▼──────┐        ┌────────▼───────┐
+       │    Parser    │        │   Serializer   │
+       │              │        │                │
+       │  DOM-Baum    │        │  ① items-Pfad  │
+       │  + items     │        │  ② DOM-Pfad    │
+       └──────┬───────┘        └────────────────┘
+              │
+       ┌──────▼───────┐
+       │     CST      │
+       │ Vec<Document │
+       │    Item>     │
        └──────────────┘
 ```
 
 ### Parser (`src/parser.rs`)
 
-Der Parser ist ein **rekursiver Abstieg** direkt auf dem UTF-8-Eingabestring. Eine interne `Source`-Struktur verwaltet die aktuelle Byte-Position sowie Zeile und Spalte für Fehlermeldungen. Es gibt keine separate Lexer-Schicht; Tokenisierung und semantische Analyse laufen zusammen.
+Der Parser ist ein **rekursiver Abstieg** direkt auf dem UTF-8-Eingabestring. Eine interne `Source`-Struktur verwaltet die aktuelle Byte-Position sowie Zeile und Spalte für Fehlermeldungen.
 
-Für jede ABNF-Regel der TOML-Grammatik gibt es eine eigene Methode:
-`parse_document` → `parse_keyval` → `parse_key` / `parse_value` → `parse_string_basic` / `parse_number_or_datetime` / `parse_array` / `parse_inline_table` usw.
+Neu in v0.2: Der Parser zeichnet für jedes Token den **vollständigen Originaltext** auf — Kommentarzeilen vor einem Schlüssel, den Schlüssel exakt wie geschrieben, den Whitespace um das `=`-Zeichen, den Wert als Rohtext (also z. B. `0xFF` statt `255`), den Inline-Kommentar danach und das Zeilenende. Diese Metadaten werden in einer flachen `Vec<DocumentItem>` gespeichert.
 
-Eine `ParseContext`-Struktur verfolgt den Zustand jedes Tabellenpfades (`ExplicitlyDefined`, `ImplicitlyCreated`, `Inline`, `ArrayElement`) und erkennt damit alle von der Spezifikation verbotenen Konstrukte — doppelte Schlüssel, erneute Tabellendefinition, nachträgliche Erweiterung von Inline-Tables.
+### CST-Schicht (`src/cst.rs`)
+
+`DocumentItem` ist das zentrale Enum der CST-Schicht:
+
+```rust
+pub enum DocumentItem {
+    Entry {
+        node: EntryNode,    // Formatierungsmetadaten + Rohtexte
+        path: Vec<String>,  // DOM-Pfad für Lookup
+    },
+    Section(SectionNode),   // [header] oder [[array-of-tables]]
+    Eof(String),            // Whitespace/Kommentare am Dateiende
+}
+```
+
+`EntryNode` speichert alle Formatierungsinformationen eines Eintrags:
+
+```rust
+pub struct EntryNode {
+    pub leading:   String,         // Kommentare/Leerzeilen vor dem Schlüssel
+    pub raw_key:   String,         // Schlüssel im Originaltext
+    pub pre_eq:    String,         // Whitespace vor "="
+    pub post_eq:   String,         // Whitespace nach "="
+    pub raw_value: Option<String>, // Wert im Originaltext; None = neu generieren
+    pub trailing:  String,         // Inline-Kommentar + Zeilenende
+}
+```
 
 ### Datenmodell (`src/value.rs`)
 
@@ -106,15 +154,19 @@ pub enum Value {
 
 ### Serializer (`src/serializer.rs`)
 
-Der Serializer traversiert das Datenmodell und erzeugt TOML-Text nach folgenden Regeln:
+Der Serializer hat zwei Pfade:
 
-- Skalare Werte werden direkt ausgegeben.
+**Format-erhaltender Pfad** (geparstes Dokument, kein `sort_keys`/`prefer_inline`):  
+Läuft die `Vec<DocumentItem>` in Quellreihenfolge durch und gibt für jeden Eintrag den gespeicherten Originaltext aus. Nur Einträge, deren `raw_value` durch `Document::set_value` geleert wurde, werden neu generiert.
+
+**Kanonischer DOM-Pfad** (programmatisch erstelltes Dokument, oder `sort_keys`/`prefer_inline` gesetzt):  
+Traversiert den DOM-Baum und erzeugt TOML-Text nach folgenden Regeln:
 - Floats erhalten immer `.` oder `e` (z. B. `1.0`, nie `1`).
 - Strings werden als Basic-Strings `"…"` ausgegeben, Sonderzeichen werden escapt.
 - Schlüssel mit Zeichen außerhalb von `A-Za-z0-9_-` werden in Anführungszeichen gesetzt.
 - Verschachtelte Tables erscheinen als `[pfad]`-Header.
 - Arrays of Tables erscheinen als `[[pfad]]`-Header.
-- Sehr flache Tables (≤ 4 Einträge, keine Sub-Tables) können optional als Inline-Tables `{…}` ausgegeben werden.
+- Sehr flache Tables (≤ 4 Einträge, keine Sub-Tables) werden als Inline-Tables `{…}` ausgegeben.
 
 ---
 
@@ -122,11 +174,9 @@ Der Serializer traversiert das Datenmodell und erzeugt TOML-Text nach folgenden 
 
 ### 1. Abhängigkeit in `Cargo.toml`
 
-Da `toml_dom` noch nicht auf [crates.io](https://crates.io) veröffentlicht ist, binden Sie es über einen lokalen Pfad ein. Passen Sie den Pfad an Ihre Verzeichnisstruktur an:
-
 ```toml
 [dependencies]
-toml_dom = { path = "../toml/rust" }
+toml_dom = "0.2"
 ```
 
 ### 2. In der Quelldatei importieren
@@ -165,7 +215,7 @@ fn main() -> Result<(), toml_dom::TomlError> {
 
 ### Document
 
-`Document` ist der zentrale Einstiegspunkt. Es hält das gesamte TOML-Dokument als Root-`Table`.
+`Document` ist der zentrale Einstiegspunkt. Es hält das gesamte TOML-Dokument als Root-`Table` sowie — bei geparsten Dokumenten — die `Vec<DocumentItem>` für den format-erhaltenden Roundtrip.
 
 #### Einlesen
 
@@ -184,7 +234,7 @@ let doc = Document::parse_reader(reader)?;
 
 #### Programmatisch aufbauen
 
-`Document::from_table` erstellt ein Dokument aus einer fertig befüllten `Table`, ohne Parsing:
+`Document::from_table` erstellt ein Dokument aus einer fertig befüllten `Table`, ohne Parsing. Solche Dokumente enthalten keine Formatierungsmetadaten und serialisieren immer kanonisch.
 
 ```rust
 use toml_dom::{Document, Table, Value};
@@ -223,7 +273,31 @@ if let Some(val) = doc.path("server.host") {
 
 > **Hinweis:** `path` teilt den String an jedem `.`. Schlüssel, die selbst einen Punkt enthalten (z. B. `"google.com"` als quoted key), müssen mit `root().get_path_segments(&["site", "google.com"])` abgerufen werden.
 
-#### Ändern
+#### Ändern — format-erhaltend (`set_value`)
+
+`Document::set_value` ist der bevorzugte Mutationspfad bei geparsten Dokumenten. Er aktualisiert sowohl den DOM-Baum als auch die Formatierungsliste: der `raw_value` des betreffenden Eintrags wird geleert, sodass der Serializer genau diesen einen Wert neu generiert — alle anderen Einträge bleiben unberührt.
+
+```rust
+// config.toml enthält: port = 8080  # Standard-Port
+let mut doc = Document::parse_file("config.toml")?;
+
+// Ändert den Wert, bewahrt Kommentar und alle anderen Formatierungen
+let ok = doc.set_value(&["port"], Value::Integer(9090));
+assert!(ok);  // false, wenn der Pfad nicht existiert
+
+doc.write_file("config.toml")?;
+// Ergebnis: port = 9090  # Standard-Port
+```
+
+Für verschachtelte Pfade:
+
+```rust
+doc.set_value(&["server", "port"], Value::Integer(443));
+```
+
+#### Ändern — direkt über DOM
+
+Über `root_mut()` kann der DOM-Baum direkt verändert werden. Diese Änderungen werden beim Serialisieren zuverlässig ausgegeben; Formatierungsmetadaten für geänderte Einträge werden dabei nicht automatisch aktualisiert.
 
 ```rust
 // Wert überschreiben oder neu einfügen
@@ -244,10 +318,11 @@ doc.root_mut().remove("debug");
 #### Serialisieren und Schreiben
 
 ```rust
-// Als String ausgeben (Standardoptionen)
+// Als String ausgeben (Standardoptionen, format-erhaltend bei geparsten Dokumenten)
 let toml_text: String = doc.serialize();
 
 // Als String mit eigenen Optionen
+// Hinweis: sort_keys/prefer_inline erzwingen den kanonischen DOM-Pfad
 let opts = SerializeOptions {
     sort_keys: true,
     ..Default::default()
@@ -257,6 +332,23 @@ let toml_text = doc.serialize_with(&opts);
 // In Datei schreiben
 doc.write_file("output.toml")?;
 doc.write_file_with("output.toml", &opts)?;
+```
+
+#### CST-Zugriff
+
+```rust
+// Rohe Item-Liste lesen (für fortgeschrittene Anwendungsfälle)
+for item in doc.items() {
+    match item {
+        toml_dom::DocumentItem::Entry { node, path } => {
+            println!("Schlüssel: {} → Rohwert: {:?}", node.raw_key, node.raw_value);
+        }
+        toml_dom::DocumentItem::Section(s) => {
+            println!("Abschnitt: {}", s.raw);
+        }
+        toml_dom::DocumentItem::Eof(_) => {}
+    }
+}
 ```
 
 ---
@@ -457,17 +549,19 @@ use toml_dom::SerializeOptions;
 let opts = SerializeOptions {
     sort_keys:        false,        // Schlüssel in Einfügereihenfolge
     prefer_inline:    false,        // Tables als [header], nicht {…}
-    indent:           "    ".into(),// vier Leerzeichen
-    trailing_newline: true,         // Datei mit \n abschließen
+    indent:           "    ".into(),// vier Leerzeichen (nur kanonischer Pfad)
+    trailing_newline: true,         // Datei mit \n abschließen (nur kanonischer Pfad)
 };
 ```
 
 | Option | Standard | Beschreibung |
 |--------|----------|-------------|
-| `sort_keys` | `false` | Schlüssel alphabetisch sortieren |
-| `prefer_inline` | `false` | Kleine Tables als Inline-Tables `{…}` |
-| `indent` | `"    "` | Einrückung für verschachtelte Tables |
-| `trailing_newline` | `true` | Abschließendes `\n` |
+| `sort_keys` | `false` | Schlüssel alphabetisch sortieren (erzwingt kanonischen Pfad) |
+| `prefer_inline` | `false` | Kleine Tables als Inline-Tables `{…}` (erzwingt kanonischen Pfad) |
+| `indent` | `"    "` | Einrückung für verschachtelte Tables (nur kanonischer Pfad) |
+| `trailing_newline` | `true` | Abschließendes `\n` (nur kanonischer Pfad) |
+
+> **Hinweis:** `sort_keys: true` und `prefer_inline: true` erzwingen den kanonischen DOM-Pfad — auch bei geparsten Dokumenten. Format und Kommentare gehen dabei verloren. Für format-erhaltendes Schreiben einfach `doc.serialize()` ohne Optionen verwenden.
 
 ---
 
@@ -520,7 +614,36 @@ fn main() -> Result<(), toml_dom::TomlError> {
 }
 ```
 
-### Dokument lesen, ändern und zurückschreiben
+### Format-erhaltend ändern und zurückschreiben
+
+```rust
+use toml_dom::{Document, Value};
+
+fn main() -> Result<(), toml_dom::TomlError> {
+    // Ausgangsdatei config.toml:
+    //
+    //   # Servereinstellungen
+    //   [server]
+    //   host = 'localhost'   # IPv4-Adresse
+    //   port = 0x1F90        # Hex: 8080
+    //
+    let mut doc = Document::parse_file("config.toml")?;
+
+    // Nur den Port ändern — alles andere bleibt byte-identisch
+    doc.set_value(&["server", "port"], Value::Integer(9090));
+
+    doc.write_file("config.toml")?;
+    // Ergebnis:
+    //
+    //   # Servereinstellungen
+    //   [server]
+    //   host = 'localhost'   # IPv4-Adresse
+    //   port = 9090          # Hex: 8080
+    Ok(())
+}
+```
+
+### Dokument lesen, ändern und zurückschreiben (DOM-Pfad)
 
 ```rust
 use toml_dom::{Document, Value, SerializeOptions};
@@ -617,15 +740,16 @@ rust/
 ├── fuzz/
 │   ├── Cargo.toml
 │   └── fuzz_targets/
-│       └── fuzz_parse.rs   — Fuzzing-Einstiegspunkt für Document::parse
+│       └── fuzz_parse.rs        — Fuzzing-Einstiegspunkt für Document::parse
 └── src/
-    ├── lib.rs              — Crate-Root, Re-Exports
-    ├── error.rs            — TomlError, TomlErrorKind, SourceLocation
-    ├── datetime.rs         — LocalDate, LocalTime, LocalDateTime, OffsetDateTime
-    ├── value.rs            — Value, Array, Table, FromValue-Trait
-    ├── parser.rs           — Rekursiver Abstieg, ParseContext
-    ├── serializer.rs       — Serializer, SerializeOptions
-    ├── document.rs         — Document
+    ├── lib.rs                   — Crate-Root, Re-Exports
+    ├── error.rs                 — TomlError, TomlErrorKind, SourceLocation
+    ├── datetime.rs              — LocalDate, LocalTime, LocalDateTime, OffsetDateTime
+    ├── value.rs                 — Value, Array, Table, FromValue-Trait
+    ├── cst.rs                   — DocumentItem, EntryNode, SectionNode (CST-Schicht)
+    ├── parser.rs                — Rekursiver Abstieg, ParseContext, Rohtexterfassung
+    ├── serializer.rs            — Serializer (format-erhaltend + kanonisch), SerializeOptions
+    ├── document.rs              — Document, set_value, items()
     └── tests/
         ├── mod.rs
         ├── test_datetime.rs
@@ -634,7 +758,8 @@ rust/
         ├── test_float.rs
         ├── test_table.rs
         ├── test_serializer.rs
-        └── test_roundtrip.rs
+        ├── test_roundtrip.rs
+        └── test_format_preserve.rs — Tests für format-erhaltenden Roundtrip
 ```
 
 Tests ausführen:
@@ -648,3 +773,54 @@ Fuzzing (erfordert Nightly + cargo-fuzz):
 ```sh
 cargo +nightly fuzz run fuzz_parse
 ```
+
+---
+
+## Changelog
+
+### v0.2.0
+
+**Hauptfeature: Format-erhaltender Roundtrip**
+
+Der Parser zeichnet jetzt für jeden Token den vollständigen Originaltext auf. Beim Serialisieren werden diese Rohtexte direkt ausgegeben, sodass Kommentare, Formatierungen und Schreibweisen aller unveränderten Einträge exakt erhalten bleiben.
+
+**Neue öffentliche Typen** (in `src/cst.rs`, re-exportiert aus dem Crate-Root):
+
+- `DocumentItem` — flache Liste aller Quellelemente (Einträge, Abschnittsheader, Dateiende)
+- `EntryNode` — Formatierungsmetadaten eines Schlüssel-Wert-Paares: `leading`, `raw_key`, `pre_eq`, `post_eq`, `raw_value`, `trailing`
+- `SectionNode` — Abschnittsheader `[…]` oder `[[…]]` mit `leading`, `raw`, `trailing`, `path`, `is_array`
+
+**Neue Methoden auf `Document`:**
+
+- `Document::set_value(&["pfad", "zum", "key"], value)` — ändert einen Wert format-erhaltend: nur dieser Wert wird neu generiert, alle anderen Formatierungen bleiben unberührt
+- `Document::items() -> &[DocumentItem]` — Lesezugriff auf die CST-Itemliste
+
+**Serializer-Verhalten:**
+
+- Geparstes Dokument ohne `sort_keys`/`prefer_inline` → format-erhaltender Pfad (neu)
+- `sort_keys: true` oder `prefer_inline: true` → kanonischer DOM-Pfad (wie v0.1)
+- Programmatisch erstelltes Dokument → kanonischer DOM-Pfad (wie v0.1)
+- `trailing_newline` wirkt jetzt nur noch auf den kanonischen Pfad; der format-erhaltende Pfad reproduziert das originale Zeilenende
+
+**Bugfix:**
+
+- Absturz in `parse_time_str` bei unvollständigem Sekundenfeld (`13:63:` ohne folgende Ziffern) — durch Fuzzing gefunden, in v0.1.1 auf crates.io behoben, in v0.2.0 enthalten
+
+**Nicht geändert:**
+
+`Value`, `Table`, `Array`, `FromValue`, `TomlError`, `TomlErrorKind`, `SourceLocation` — vollständig rückwärtskompatibel.
+
+---
+
+### v0.1.0
+
+Erstveröffentlichung:
+
+- Vollständige TOML-1.1-Implementierung (Parser + Serializer)
+- Alle zehn TOML-Typen
+- `IndexMap`-basierte `Table` (Einfügereihenfolge erhalten)
+- Chrono-Konvertierungen für alle vier Datetime-Typen
+- Pfadzugriff (`get_path`, `get_path_segments`) mit Unterstützung für Punkte in Schlüsselnamen
+- `SerializeOptions` (Schlüsselsortierung, Inline-Präferenz, Einrückung)
+- Präzise Fehlermeldungen mit Zeile und Spalte
+- cargo-fuzz-Integration
