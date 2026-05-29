@@ -282,3 +282,140 @@ fn test_set_value_inline_table_in_section() {
     );
 }
 
+// ── set_path: dot-string convenience ─────────────────────────────────────────
+
+#[test]
+fn test_set_path_scalar() {
+    let src = "port = 8080  # default\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_path("port", Value::Integer(9090));
+    assert!(ok);
+    let out = doc.serialize();
+    assert!(out.contains("9090"), "new value missing");
+    assert!(out.contains("# default"), "comment lost");
+}
+
+#[test]
+fn test_set_path_nested() {
+    let src = "[server]\nport = 8080\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_path("server.port", Value::Integer(443));
+    assert!(ok);
+    assert_eq!(*doc.root().get_path("server.port").unwrap(), Value::Integer(443));
+    // Section header preserved
+    assert!(doc.serialize().contains("[server]"));
+}
+
+#[test]
+fn test_set_path_not_found() {
+    let src = "x = 1\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(!doc.set_path("missing", Value::Integer(0)));
+}
+
+#[test]
+fn test_set_path_preserves_other_entries() {
+    let src = "# comment\nhost = 'localhost'\nport = 8080\n";
+    let mut doc = Document::parse(src).unwrap();
+    doc.set_path("port", Value::Integer(9090));
+    let out = doc.serialize();
+    assert!(out.contains("# comment\n"), "comment lost");
+    assert!(out.contains("host = 'localhost'"), "literal string lost");
+    assert!(out.contains("9090"), "new value missing");
+}
+
+// ── set_element: typed array-element mutation ─────────────────────────────────
+
+#[test]
+fn test_set_element_middle() {
+    let src = "nums = [10, 20, 30]\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_element(&["nums"], 1, Value::Integer(99));
+    assert!(ok);
+    let out = doc.serialize();
+    let doc2 = Document::parse(&out).unwrap();
+    let arr = doc2.get::<crate::value::Array>("nums").unwrap();
+    assert_eq!(arr[0], Value::Integer(10));
+    assert_eq!(arr[1], Value::Integer(99));
+    assert_eq!(arr[2], Value::Integer(30));
+}
+
+#[test]
+fn test_set_element_first() {
+    let src = "v = [1, 2, 3]\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(doc.set_element(&["v"], 0, Value::Integer(100)));
+    let out = doc.serialize();
+    let doc2 = Document::parse(&out).unwrap();
+    assert_eq!(doc2.get::<crate::value::Array>("v").unwrap()[0], Value::Integer(100));
+}
+
+#[test]
+fn test_set_element_last() {
+    let src = "v = [1, 2, 3]\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(doc.set_element(&["v"], 2, Value::Integer(999)));
+    let out = doc.serialize();
+    let doc2 = Document::parse(&out).unwrap();
+    let arr = doc2.get::<crate::value::Array>("v").unwrap();
+    assert_eq!(arr[2], Value::Integer(999));
+}
+
+#[test]
+fn test_set_element_out_of_bounds() {
+    let src = "v = [1, 2, 3]\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(!doc.set_element(&["v"], 5, Value::Integer(0)));
+    // Document unchanged
+    assert_eq!(doc.serialize(), src);
+}
+
+#[test]
+fn test_set_element_path_not_found() {
+    let src = "v = [1, 2, 3]\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(!doc.set_element(&["missing"], 0, Value::Integer(0)));
+}
+
+#[test]
+fn test_set_element_not_an_array() {
+    let src = "x = 42\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(!doc.set_element(&["x"], 0, Value::Integer(0)));
+}
+
+#[test]
+fn test_set_element_in_section() {
+    let src = "[data]\nids = [100, 200, 300]\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(doc.set_element(&["data", "ids"], 0, Value::Integer(999)));
+    let out = doc.serialize();
+    assert!(out.contains("[data]"), "section header lost");
+    let doc2 = Document::parse(&out).unwrap();
+    let arr = doc2.root()
+        .get_path("data.ids")
+        .and_then(|v| if let Value::Array(a) = v { Some(a) } else { None })
+        .unwrap();
+    assert_eq!(arr[0], Value::Integer(999));
+    assert_eq!(arr[1], Value::Integer(200));
+}
+
+#[test]
+fn test_set_element_preserves_formatting() {
+    // Multiline array: only the targeted element's raw is cleared
+    let src = "nums = [\n  10,\n  20,\n  30,\n]\n";
+    let mut doc = Document::parse(src).unwrap();
+    assert!(doc.set_element(&["nums"], 1, Value::Integer(99)));
+    let out = doc.serialize();
+    // Multiline structure preserved for untouched elements
+    assert!(out.contains("  10,"), "first element formatting lost");
+    assert!(out.contains("  30,"), "last element formatting lost");
+    // New value present
+    assert!(out.contains("99"), "new value missing");
+    // Re-parseable and correct
+    let doc2 = Document::parse(&out).unwrap();
+    let arr = doc2.get::<crate::value::Array>("nums").unwrap();
+    assert_eq!(arr[0], Value::Integer(10));
+    assert_eq!(arr[1], Value::Integer(99));
+    assert_eq!(arr[2], Value::Integer(30));
+}

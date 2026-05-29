@@ -153,6 +153,63 @@ impl Document {
         false
     }
 
+    /// Convenience shorthand for [`set_value`](Document::set_value) that
+    /// accepts a dot-separated path string, mirroring [`Document::path`].
+    ///
+    /// The path is split naively at every `.`.  Keys that themselves contain a
+    /// dot must be passed as explicit segments via [`set_value`](Document::set_value)
+    /// instead — the same limitation that applies to [`Document::path`].
+    ///
+    /// Returns `true` when the path was found and updated.
+    pub fn set_path(&mut self, dotted: &str, value: Value) -> bool {
+        let segments: Vec<&str> = dotted.split('.').collect();
+        self.set_value(&segments, value)
+    }
+
+    /// Replace a single array element by index while preserving all formatting.
+    ///
+    /// `path` must identify an entry whose top-level value is an array.
+    /// `index` is the 0-based position within that array.
+    ///
+    /// Only elements of arrays that are direct document entries (not arrays
+    /// nested inside inline tables) can be targeted this way.  For the nested
+    /// case use [`set_value`](Document::set_value) with a stringified index:
+    /// `set_value(&["tbl", "arr", "0"], val)`.
+    ///
+    /// Returns `true` when the element was found and updated, `false` when the
+    /// path does not exist, does not point to an array, or `index` is out of
+    /// bounds.
+    pub fn set_element(&mut self, path: &[&str], index: usize, value: Value) -> bool {
+        if path.is_empty() { return false; }
+        let path_owned: Vec<String> = path.iter().map(|s| s.to_string()).collect();
+
+        // Update CST: locate the array entry and clear the target element's raw.
+        let mut found = false;
+        for item in &mut self.items {
+            if let DocumentItem::Entry { node, path: item_path } = item {
+                if *item_path == path_owned {
+                    if let ValueNode::Array(arr) = &mut node.node {
+                        if let Some(elem) = arr.elements.get_mut(index) {
+                            elem.node = ValueNode::new_dirty(value.clone());
+                            found = true;
+                        }
+                    }
+                    break; // path matched — exit regardless of outcome
+                }
+            }
+        }
+        if !found { return false; }
+
+        // Update DOM: navigate to the array and overwrite the element in place.
+        if let Some(Value::Array(arr)) = self.root.get_path_segments_mut(path) {
+            if let Some(elem) = arr.0.get_mut(index) {
+                *elem = value;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Return the source-order items list.
     pub fn items(&self) -> &[DocumentItem] {
         &self.items
