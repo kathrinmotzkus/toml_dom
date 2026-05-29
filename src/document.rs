@@ -3,7 +3,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use crate::cst::DocumentItem;
+use crate::cst::{raw_key_to_segments, DocumentItem, ValueNode};
 use crate::error::TomlError;
 use crate::serializer::SerializeOptions;
 use crate::value::{FromValue, Table, Value};
@@ -12,14 +12,11 @@ pub use crate::serializer::serialize;
 
 /// A complete, parsed TOML document.
 ///
-/// A `Document` owns the root [`Table`] and exposes convenience methods for
-/// parsing, value access, and serialization.
-///
 /// Documents produced by [`Document::parse`] preserve the full source
-/// formatting internally.  Calling [`Document::serialize`] on such a document
-/// reproduces the original text exactly — including comments, string quoting
-/// style, number radix and underscores, blank lines, and inline vs. block
-/// table style — except for values explicitly changed via
+/// formatting internally.  Calling [`Document::serialize`] on such a
+/// document reproduces the original text exactly — including comments,
+/// string quoting style, number radix and underscores, blank lines, and
+/// inline vs. block table style — except for values changed via
 /// [`Document::set_value`].
 ///
 /// Documents created with [`Document::from_table`] contain no formatting
@@ -43,8 +40,6 @@ pub use crate::serializer::serialize;
 #[derive(Debug, Clone)]
 pub struct Document {
     root: Table,
-    /// Source-order items for format-preserving serialization.
-    /// Empty for programmatically constructed documents.
     pub(crate) items: Vec<DocumentItem>,
 }
 
@@ -55,45 +50,36 @@ impl PartialEq for Document {
 }
 
 impl Document {
-    /// The TOML specification version implemented by this library,
-    /// as a `(major, minor, patch)` tuple.
+    /// The TOML specification version implemented by this library.
     pub const TOML_VERSION: (u32, u32, u32) = (1, 1, 0);
 
-    /// Internal constructor used by the parser: supplies both DOM and items.
     pub(crate) fn from_parts(root: Table, items: Vec<DocumentItem>) -> Self {
         Self { root, items }
     }
 
     /// Create a `Document` from an already-built root [`Table`].
     ///
-    /// The resulting document has no formatting metadata; it will always
-    /// serialize to canonical TOML.
+    /// The resulting document has no formatting metadata; it always serializes
+    /// to canonical TOML.
     pub fn from_table(root: Table) -> Self {
-        Self {
-            root,
-            items: vec![],
-        }
+        Self { root, items: vec![] }
     }
 
     // ── Parsing ───────────────────────────────────────────────────────────────
 
     /// Parse a TOML document from a string slice.
-    ///
-    /// Returns `Err(TomlError)` on any syntax error, duplicate key, or
-    /// integer overflow detected during parsing.
     pub fn parse(text: &str) -> Result<Self, TomlError> {
         crate::parser::parse(text)
     }
 
-    /// Parse a TOML document by reading all bytes from `reader` into a string
-    /// and then parsing it.
+    /// Parse a TOML document from a `Read` source.
     pub fn parse_reader(mut reader: impl Read) -> Result<Self, TomlError> {
         let mut text = String::new();
         reader.read_to_string(&mut text)?;
         Self::parse(&text)
     }
 
-    /// Read the file at `path` and parse its contents as TOML.
+    /// Read and parse a TOML file.
     pub fn parse_file(path: impl AsRef<Path>) -> Result<Self, TomlError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
@@ -112,8 +98,7 @@ impl Document {
     ///
     /// Mutations through this reference update the DOM but do **not**
     /// automatically update the format-preserving items list.  Use
-    /// [`Document::set_value`] to modify values while keeping formatting
-    /// intact.
+    /// [`Document::set_value`] to modify values while keeping formatting intact.
     pub fn root_mut(&mut self) -> &mut Table {
         &mut self.root
     }
@@ -128,87 +113,108 @@ impl Document {
         self.root.get_path(dotted)
     }
 
-    /// Look up a value mutably by dot-separated path starting from the
-    /// document root.
+    /// Look up a value mutably by dot-separated path starting from the root.
     pub fn path_mut(&mut self, dotted: &str) -> Option<&mut Value> {
         self.root.get_path_mut(dotted)
     }
 
     // ── Format-preserving mutation ────────────────────────────────────────────
 
-    /// Replace the value at `path` while preserving the formatting of all
-    /// other entries.
+    /// Replace the value at `path` while preserving all surrounding formatting.
     ///
-    /// The matching entry's `raw_value` is cleared so the serializer will
-    /// regenerate that one value in canonical form.  All surrounding
-    /// whitespace, comments, and other entries remain untouched.
+    /// The method searches the items list for an entry whose path starts with
+    /// the given path.  For top-level entries (scalars, arrays, inline tables)
+    /// the match is exact.  For entries inside inline tables or arrays the
+    /// search descends into the [`ValueNode`] tree.
     ///
-    /// Returns `true` when the path was found and updated, `false` when no
-    /// matching entry exists in the items list (the DOM is not modified in
-    /// that case either).
+    /// Returns `true` when the value was found and updated, `false` otherwise.
     pub fn set_value(&mut self, path: &[&str], value: Value) -> bool {
+        if path.is_empty() { return false; }
         let path_owned: Vec<String> = path.iter().map(|s| s.to_string()).collect();
 
-        // Update items list
-        let mut found = false;
         for item in &mut self.items {
-            if let DocumentItem::Entry { node, path: p } = item {
-                if *p == path_owned {
-                    node.raw_value = None;
-                    found = true;
-                    break;
+            if let DocumentItem::Entry { node, path: item_path } = item {
+                // Exact match — top-level entry
+                if *item_path == path_owned {
+                    node.node = ValueNode::new_dirty(value.clone());
+                    let _ = self.root.insert_path_segments(path, value);
+                    return true;
+                }
+                // Prefix match — path leads into this entry's ValueNode tree
+                if path_owned.starts_with(item_path.as_slice()) {
+                    let remainder = &path_owned[item_path.len()..];
+                    if navigate_value_node_mut(&mut node.node, remainder, value.clone()) {
+                        let _ = self.root.insert_path_segments(path, value);
+                        return true;
+                    }
                 }
             }
         }
-        if !found {
-            return false;
-        }
-
-        // Update DOM
-        let _ = self.root.insert_path_segments(path, value);
-        true
+        false
     }
 
     /// Return the source-order items list.
-    ///
-    /// This is the flat sequence of entries, section headers, and trailing
-    /// whitespace that drives format-preserving serialization.  Empty for
-    /// documents that were not produced by parsing.
     pub fn items(&self) -> &[DocumentItem] {
         &self.items
     }
 
     // ── Serialization ─────────────────────────────────────────────────────────
 
-    /// Serialize the document to a TOML-formatted string using default
-    /// [`SerializeOptions`].
-    ///
-    /// If the document was produced by [`Document::parse`], the output
-    /// preserves all original formatting except for values changed via
-    /// [`Document::set_value`].
+    /// Serialize to TOML text using default [`SerializeOptions`].
     pub fn serialize(&self) -> String {
         crate::serializer::serialize(self, &SerializeOptions::default())
     }
 
-    /// Serialize the document to a TOML-formatted string using the supplied
-    /// [`SerializeOptions`].
+    /// Serialize to TOML text using the supplied [`SerializeOptions`].
     pub fn serialize_with(&self, opts: &SerializeOptions) -> String {
         crate::serializer::serialize(self, opts)
     }
 
-    /// Serialize the document and write the result to a file.
+    /// Serialize and write to a file.
     pub fn write_file(&self, path: impl AsRef<Path>) -> Result<(), TomlError> {
         self.write_file_with(path, &SerializeOptions::default())
     }
 
-    /// Serialize with `opts` and write the result to a file.
+    /// Serialize with `opts` and write to a file.
     pub fn write_file_with(
         &self,
         path: impl AsRef<Path>,
         opts: &SerializeOptions,
     ) -> Result<(), TomlError> {
-        let text = self.serialize_with(opts);
-        std::fs::write(path, text)?;
+        std::fs::write(path, self.serialize_with(opts))?;
         Ok(())
+    }
+}
+
+// ── ValueNode navigation ──────────────────────────────────────────────────────
+
+/// Descend into a [`ValueNode`] tree by `path` and mark the target as dirty.
+///
+/// Returns `true` when the path was resolved and the node was updated.
+fn navigate_value_node_mut(node: &mut ValueNode, path: &[String], value: Value) -> bool {
+    if path.is_empty() {
+        *node = ValueNode::new_dirty(value);
+        return true;
+    }
+    match node {
+        ValueNode::InlineTable(tbl) => {
+            for entry in &mut tbl.entries {
+                let key_segs = raw_key_to_segments(&entry.raw_key);
+                if path.starts_with(key_segs.as_slice()) {
+                    let sub_path = &path[key_segs.len()..];
+                    return navigate_value_node_mut(&mut entry.node, sub_path, value);
+                }
+            }
+            false
+        }
+        ValueNode::Array(arr) => {
+            if let Ok(idx) = path[0].parse::<usize>() {
+                if let Some(elem) = arr.elements.get_mut(idx) {
+                    return navigate_value_node_mut(&mut elem.node, &path[1..], value);
+                }
+            }
+            false
+        }
+        ValueNode::Scalar { .. } => false,
     }
 }

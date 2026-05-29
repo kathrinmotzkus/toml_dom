@@ -144,13 +144,141 @@ fn test_roundtrip_idempotency_crash_1() {
 
 #[test]
 fn test_roundtrip_idempotency_debug() {
-    use crate::cst::DocumentItem;
     let s = "-.6.-=3   #";
     let doc = crate::document::Document::parse(s).unwrap();
-    eprintln!("items.len() = {}", doc.items().len());
-    for (i, item) in doc.items().iter().enumerate() {
-        eprintln!("item[{}] = {:?}", i, item);
-    }
     let s2 = doc.serialize();
-    eprintln!("s2 = {:?}", s2);
+    let doc2 = crate::document::Document::parse(&s2).unwrap();
+    let s3 = doc2.serialize();
+    assert_eq!(s2, s3);
 }
+
+// ── Inline table: format preservation ────────────────────────────────────────
+
+#[test]
+fn test_preserve_inline_table_roundtrip() {
+    roundtrip("point = { x = 1, y = 2 }\n");
+}
+
+#[test]
+fn test_preserve_inline_table_multiline() {
+    roundtrip("t = {\n  a = 1,\n  b = 2,\n}\n");
+}
+
+#[test]
+fn test_preserve_inline_table_trailing_comma() {
+    roundtrip("t = { a = 1, b = 2, }\n");
+}
+
+#[test]
+fn test_preserve_inline_table_hex_value() {
+    roundtrip("t = { port = 0x1F90, host = 'localhost' }\n");
+}
+
+// ── Inline table: set_value on individual entries ─────────────────────────────
+
+#[test]
+fn test_set_value_inline_table_entry() {
+    let src = "point = { x = 1, y = 2 }\n";
+    let mut doc = Document::parse(src).unwrap();
+    let updated = doc.set_value(&["point", "x"], Value::Integer(99));
+    assert!(updated, "set_value returned false");
+    let out = doc.serialize();
+    // y preserved as literal; x regenerated
+    assert!(out.contains("y = 2"), "y lost");
+    assert!(out.contains("x = 99"), "new x missing");
+    // surrounding structure preserved
+    assert!(out.starts_with("point = {"), "inline table structure lost");
+    // value is still parseable and correct
+    let doc2 = Document::parse(&out).unwrap();
+    assert_eq!(*doc2.root().get_path("point.x").unwrap(), Value::Integer(99));
+    assert_eq!(*doc2.root().get_path("point.y").unwrap(), Value::Integer(2));
+}
+
+#[test]
+fn test_set_value_inline_table_string_entry() {
+    let src = "conn = { host = 'localhost', port = 5432 }\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_value(&["conn", "host"], Value::String("db.example.com".into()));
+    assert!(ok);
+    let out = doc.serialize();
+    assert!(out.contains("port = 5432"), "port lost");
+    let doc2 = Document::parse(&out).unwrap();
+    assert_eq!(
+        *doc2.root().get_path("conn.host").unwrap(),
+        Value::String("db.example.com".into())
+    );
+}
+
+#[test]
+fn test_set_value_inline_table_not_found() {
+    let src = "point = { x = 1, y = 2 }\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_value(&["point", "z"], Value::Integer(3));
+    assert!(!ok, "should return false for missing key");
+}
+
+// ── Array: format preservation ────────────────────────────────────────────────
+
+#[test]
+fn test_preserve_array_inline() {
+    roundtrip("nums = [1, 2, 3]\n");
+}
+
+#[test]
+fn test_preserve_array_trailing_comma() {
+    roundtrip("tags = [\"a\", \"b\", \"c\",]\n");
+}
+
+#[test]
+fn test_preserve_array_multiline() {
+    roundtrip("nums = [\n  1,\n  2,\n  3,\n]\n");
+}
+
+#[test]
+fn test_preserve_array_mixed_spacing() {
+    roundtrip("v = [  1 ,  2  ]\n");
+}
+
+// ── Array: set_value on individual elements ───────────────────────────────────
+
+#[test]
+fn test_set_value_array_element() {
+    let src = "nums = [10, 20, 30]\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_value(&["nums", "1"], Value::Integer(99));
+    assert!(ok, "set_value returned false");
+    let out = doc.serialize();
+    let doc2 = Document::parse(&out).unwrap();
+    let arr = doc2.get::<crate::value::Array>("nums").unwrap();
+    assert_eq!(arr[0], Value::Integer(10));
+    assert_eq!(arr[1], Value::Integer(99));
+    assert_eq!(arr[2], Value::Integer(30));
+}
+
+#[test]
+fn test_set_value_array_first_element() {
+    let src = "v = [1, 2, 3]\n";
+    let mut doc = Document::parse(src).unwrap();
+    doc.set_value(&["v", "0"], Value::Integer(100));
+    let out = doc.serialize();
+    let doc2 = Document::parse(&out).unwrap();
+    assert_eq!(doc2.get::<crate::value::Array>("v").unwrap()[0], Value::Integer(100));
+}
+
+// ── Nested: inline table inside a section ────────────────────────────────────
+
+#[test]
+fn test_set_value_inline_table_in_section() {
+    let src = "[server]\naddr = { host = 'localhost', port = 8080 }\n";
+    let mut doc = Document::parse(src).unwrap();
+    let ok = doc.set_value(&["server", "addr", "port"], Value::Integer(9090));
+    assert!(ok);
+    let out = doc.serialize();
+    assert!(out.contains("host = 'localhost'"), "host literal string lost");
+    let doc2 = Document::parse(&out).unwrap();
+    assert_eq!(
+        *doc2.root().get_path("server.addr.port").unwrap(),
+        Value::Integer(9090)
+    );
+}
+

@@ -1,48 +1,31 @@
 //! TOML serializer: converts a [`Document`] back to TOML text.
 //!
-//! Two serialization paths exist:
+//! Two serialization paths:
 //!
-//! * **Format-preserving** — used whenever the document was produced by
-//!   parsing.  The serializer walks the `items` list and emits raw source
-//!   text for each entry.  Only entries whose `raw_value` was cleared (via
-//!   [`Document::set_value`]) are regenerated in canonical form.  All
-//!   comments, blank lines, string styles, and number representations are
-//!   reproduced verbatim.
+//! * **Format-preserving** — used for parsed documents without `sort_keys`/
+//!   `prefer_inline`.  Walks the `items` list and emits raw source text at
+//!   every level (scalars, array elements, inline table entries).  Only nodes
+//!   whose `raw` was cleared by [`Document::set_value`] are regenerated.
 //!
-//! * **Canonical DOM** — used for documents constructed programmatically via
-//!   [`Document::from_table`].  This is the original v0.1 behaviour.
+//! * **Canonical DOM** — used for programmatic documents or when `sort_keys`/
+//!   `prefer_inline` is set.  Original v0.1 behaviour.
 
 use std::collections::HashSet;
 
-use crate::cst::DocumentItem;
+use crate::cst::{ArrayNode, DocumentItem, InlineTableNode, ValueNode};
 use crate::document::Document;
 use crate::value::{Array, Table, Value};
 
 /// Configuration for the canonical DOM serializer.
-///
-/// These options only affect output when the document has no items list
-/// (i.e. was constructed programmatically).  For parsed documents the
-/// original formatting is used regardless of these settings — except
-/// `trailing_newline`, which is always respected.
-///
-/// # Defaults
-///
-/// | Field              | Default         |
-/// |--------------------|-----------------|
-/// | `sort_keys`        | `false`         |
-/// | `prefer_inline`    | `false`         |
-/// | `indent`           | `"    "` (4 sp) |
-/// | `trailing_newline` | `true`          |
 #[derive(Debug, Clone)]
 pub struct SerializeOptions {
-    /// When `true`, all table keys are emitted in ascending alphabetical order.
+    /// Sort all table keys alphabetically (forces canonical path).
     pub sort_keys: bool,
-    /// When `true`, every table is serialized as an inline table `{ … }`.
+    /// Emit every table as an inline table `{ … }` (forces canonical path).
     pub prefer_inline: bool,
-    /// The string prepended per indentation level when writing nested tables.
+    /// Indentation string for nested tables (canonical path only).
     pub indent: String,
-    /// When `true` (the default), a final newline character is appended to
-    /// the output if it does not already end with one.
+    /// Append a final `\n` if missing (canonical path only).
     pub trailing_newline: bool,
 }
 
@@ -58,16 +41,6 @@ impl Default for SerializeOptions {
 }
 
 /// Serialize `doc` to a TOML string using the given [`SerializeOptions`].
-///
-/// When the document was produced by parsing **and** neither `sort_keys` nor
-/// `prefer_inline` is set, the format-preserving path is used: comments,
-/// string quoting style, number radix/underscores, blank lines, and inline
-/// vs. block table style are all reproduced verbatim.  The `trailing_newline`
-/// option is ignored on this path — the original line ending is preserved.
-///
-/// In all other cases (programmatic document, or `sort_keys`/`prefer_inline`
-/// requested) the canonical DOM serializer is used and `trailing_newline` is
-/// respected.
 pub fn serialize(doc: &Document, opts: &SerializeOptions) -> String {
     let use_dom = doc.items.is_empty() || opts.sort_keys || opts.prefer_inline;
     if use_dom {
@@ -78,8 +51,6 @@ pub fn serialize(doc: &Document, opts: &SerializeOptions) -> String {
         }
         return out;
     }
-
-    // Format-preserving path — don't override original line endings
     serialize_from_items(doc)
 }
 
@@ -87,16 +58,14 @@ pub fn serialize(doc: &Document, opts: &SerializeOptions) -> String {
 
 fn serialize_from_items(doc: &Document) -> String {
     let mut out = String::new();
-
-    // Collect all item entry paths and which ones are inline tables.
     let mut item_paths: HashSet<Vec<String>> = HashSet::new();
-    // Paths whose value is stored as an inline table raw_value (starts with '{').
-    // These must not be recursed into when looking for new DOM values.
-    let mut inline_table_paths: HashSet<Vec<String>> = HashSet::new();
 
+    // Paths whose top-level value is an inline table (ValueNode::InlineTable).
+    // We must NOT recurse into these in append_new_dom_values.
+    let mut inline_table_paths: HashSet<Vec<String>> = HashSet::new();
     for item in &doc.items {
         if let DocumentItem::Entry { node, path } = item {
-            if node.raw_value.as_deref().map_or(false, |r| r.trim_start().starts_with('{')) {
+            if matches!(node.node, ValueNode::InlineTable(_)) {
                 inline_table_paths.insert(path.clone());
             }
         }
@@ -104,16 +73,13 @@ fn serialize_from_items(doc: &Document) -> String {
 
     for item in &doc.items {
         match item {
-            DocumentItem::Eof(s) => {
-                out.push_str(s);
-            }
+            DocumentItem::Eof(s) => out.push_str(s),
             DocumentItem::Section(s) => {
                 out.push_str(&s.leading);
                 out.push_str(&s.raw);
                 out.push_str(&s.trailing);
             }
             DocumentItem::Entry { node, path } => {
-                // Skip if the entry was deleted from the DOM
                 if lookup_path(doc.root(), path).is_none() {
                     continue;
                 }
@@ -125,22 +91,15 @@ fn serialize_from_items(doc: &Document) -> String {
                 out.push('=');
                 out.push_str(&node.post_eq);
 
-                if let Some(raw) = &node.raw_value {
-                    out.push_str(raw);
-                } else {
-                    // Value was changed: regenerate in canonical form
-                    let val = lookup_path(doc.root(), path).unwrap();
-                    write_value_canonical(&mut out, val, 0);
-                }
+                let current_val = lookup_path(doc.root(), path).unwrap();
+                write_value_node(&mut out, &node.node, current_val);
 
                 out.push_str(&node.trailing);
             }
         }
     }
 
-    // Append any DOM values added after parsing (not covered by items).
-    // Build covered set: all prefixes of item entry paths, plus all section paths
-    // (section headers were already output, so their tables must not be output again).
+    // Covered set: all prefixes of item entry paths + all section paths.
     let mut covered: HashSet<Vec<String>> = HashSet::new();
     for p in &item_paths {
         for len in 1..=p.len() {
@@ -153,11 +112,77 @@ fn serialize_from_items(doc: &Document) -> String {
         }
     }
     append_new_dom_values(&mut out, doc.root(), &covered, &inline_table_paths, &[]);
-
     out
 }
 
-/// Walk the DOM and output any paths not already covered by items.
+// ── ValueNode writer ──────────────────────────────────────────────────────────
+
+/// Emit a [`ValueNode`], using `current_val` as the semantic fallback when
+/// a scalar node's `raw` is `None`.
+fn write_value_node(out: &mut String, node: &ValueNode, current_val: &Value) {
+    match node {
+        ValueNode::Scalar { raw: Some(raw), .. } => out.push_str(raw),
+        ValueNode::Scalar { raw: None, value } => write_value_canonical(out, value, 0),
+        ValueNode::Array(arr_node) => write_array_node(out, arr_node, current_val),
+        ValueNode::InlineTable(tbl_node) => write_inline_table_node(out, tbl_node, current_val),
+    }
+}
+
+fn write_array_node(out: &mut String, node: &ArrayNode, current_val: &Value) {
+    out.push_str(&node.open);
+    let elems = if let Value::Array(arr) = current_val { Some(arr) } else { None };
+    for (i, elem) in node.elements.iter().enumerate() {
+        out.push_str(&elem.leading);
+        let fallback = elems.and_then(|a| a.get(i)).unwrap_or(&Value::Boolean(false));
+        write_value_node(out, &elem.node, fallback);
+        out.push_str(&elem.trailing);
+        if let Some(comma) = &elem.comma {
+            out.push_str(comma);
+        }
+    }
+    out.push_str(&node.close);
+}
+
+fn write_inline_table_node(out: &mut String, node: &InlineTableNode, current_val: &Value) {
+    out.push_str(&node.open);
+    let tbl = if let Value::Table(t) = current_val { Some(t) } else { None };
+    for entry in &node.entries {
+        out.push_str(&entry.leading);
+        out.push_str(&entry.raw_key);
+        out.push_str(&entry.pre_eq);
+        out.push('=');
+        out.push_str(&entry.post_eq);
+        // Look up the current DOM value for this entry key
+        let key_segs = crate::cst::raw_key_to_segments(&entry.raw_key);
+        let fallback_val = tbl
+            .and_then(|t| lookup_segments(t, &key_segs))
+            .unwrap_or(&Value::Boolean(false));
+        write_value_node(out, &entry.node, fallback_val);
+        out.push_str(&entry.trailing);
+        if let Some(comma) = &entry.comma {
+            out.push_str(comma);
+        }
+    }
+    out.push_str(&node.close);
+}
+
+/// Navigate a table by decoded key segments (no array index support needed here).
+fn lookup_segments<'a>(table: &'a Table, segs: &[String]) -> Option<&'a Value> {
+    if segs.is_empty() { return None; }
+    let first = table.get(&segs[0])?;
+    if segs.len() == 1 { return Some(first); }
+    let mut current = first;
+    for seg in &segs[1..] {
+        match current {
+            Value::Table(t) => current = t.get(seg)?,
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+// ── Append new DOM values ─────────────────────────────────────────────────────
+
 fn append_new_dom_values(
     out: &mut String,
     table: &Table,
@@ -173,13 +198,10 @@ fn append_new_dom_values(
             Value::Table(t) => {
                 if covered.contains(&path) {
                     if inline_roots.contains(&path) {
-                        // Inline table: contents are in raw_value, do not recurse
                         continue;
                     }
-                    // Block table covered by items — recurse for new sub-entries
                     append_new_dom_values(out, t, covered, inline_roots, &path);
                 } else {
-                    // New table — output as [section]
                     out.push('\n');
                     out.push('[');
                     out.push_str(&path_to_header(&path));
@@ -188,8 +210,6 @@ fn append_new_dom_values(
                 }
             }
             Value::Array(arr) if is_array_of_tables(arr) => {
-                // If the array path is covered (either via entry prefixes or a Section
-                // item), all its elements were already output — skip entirely.
                 if covered.contains(&path) {
                     continue;
                 }
@@ -239,20 +259,11 @@ fn path_to_header(path: &[String]) -> String {
 }
 
 /// Traverse a DOM path that may contain stringified array indices.
-///
-/// The traversal strategy is determined by what the current value IS,
-/// not by whether the path segment looks like a number.  A segment is used
-/// as an array index only when the current value is actually an `Array`;
-/// otherwise it is used as a table key.  This correctly handles table keys
-/// that happen to be digit strings (e.g. the `"6"` in `-.6.-`).
+/// Checks value type first so that digit-string table keys are handled correctly.
 pub(crate) fn lookup_path<'a>(root: &'a Table, path: &[String]) -> Option<&'a Value> {
-    if path.is_empty() {
-        return None;
-    }
+    if path.is_empty() { return None; }
     let first = root.get(&path[0])?;
-    if path.len() == 1 {
-        return Some(first);
-    }
+    if path.len() == 1 { return Some(first); }
     let mut current = first;
     for seg in &path[1..] {
         match current {
@@ -260,18 +271,16 @@ pub(crate) fn lookup_path<'a>(root: &'a Table, path: &[String]) -> Option<&'a Va
                 let idx = seg.parse::<usize>().ok()?;
                 current = arr.get(idx)?;
             }
-            Value::Table(t) => {
-                current = t.get(seg)?;
-            }
+            Value::Table(t) => current = t.get(seg)?,
             _ => return None,
         }
     }
     Some(current)
 }
 
-// ── Canonical value writer (for new/changed values) ───────────────────────────
+// ── Canonical value writer ────────────────────────────────────────────────────
 
-fn write_value_canonical(out: &mut String, val: &Value, depth: usize) {
+pub(crate) fn write_value_canonical(out: &mut String, val: &Value, depth: usize) {
     match val {
         Value::String(s) => write_string_canonical(out, s),
         Value::Integer(n) => out.push_str(&n.to_string()),
@@ -290,11 +299,7 @@ fn write_float_canonical(out: &mut String, f: f64) {
     if f.is_nan() {
         out.push_str("nan");
     } else if f.is_infinite() {
-        if f.is_sign_positive() {
-            out.push_str("inf");
-        } else {
-            out.push_str("-inf");
-        }
+        out.push_str(if f.is_sign_positive() { "inf" } else { "-inf" });
     } else {
         let s = format!("{}", f);
         if !s.contains('.') && !s.contains('e') && !s.contains('E') {
@@ -307,15 +312,10 @@ fn write_float_canonical(out: &mut String, f: f64) {
 }
 
 fn write_array_canonical(out: &mut String, arr: &Array, depth: usize) {
-    if arr.is_empty() {
-        out.push_str("[]");
-        return;
-    }
+    if arr.is_empty() { out.push_str("[]"); return; }
     out.push('[');
     for (i, val) in arr.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
+        if i > 0 { out.push_str(", "); }
         write_value_canonical(out, val, depth);
     }
     out.push(']');
@@ -324,9 +324,7 @@ fn write_array_canonical(out: &mut String, arr: &Array, depth: usize) {
 fn write_inline_table_canonical(out: &mut String, tbl: &Table) {
     out.push('{');
     for (i, (key, val)) in tbl.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
+        if i > 0 { out.push_str(", "); }
         if needs_quoting(key) {
             out.push('"');
             for ch in key.chars() {
@@ -369,7 +367,7 @@ fn write_string_canonical(out: &mut String, s: &str) {
     out.push('"');
 }
 
-// ── Canonical DOM serializer (programmatic documents) ─────────────────────────
+// ── Canonical DOM serializer ──────────────────────────────────────────────────
 
 struct DomSerializer<'opts> {
     opts: &'opts SerializeOptions,
@@ -399,23 +397,15 @@ impl<'opts> DomSerializer<'opts> {
         };
 
         let mut deferred: Vec<&str> = Vec::new();
-
         for &key in &keys {
             let val = &table[key];
             match val {
                 Value::Table(t) => {
-                    if self.prefer_inline_table(t) {
-                        self.write_key_value(out, key, val, depth);
-                    } else {
-                        deferred.push(key);
-                    }
+                    if self.prefer_inline_table(t) { self.write_key_value(out, key, val, depth); }
+                    else { deferred.push(key); }
                 }
-                Value::Array(arr) if is_array_of_tables(arr) => {
-                    deferred.push(key);
-                }
-                _ => {
-                    self.write_key_value(out, key, val, depth);
-                }
+                Value::Array(arr) if is_array_of_tables(arr) => deferred.push(key),
+                _ => self.write_key_value(out, key, val, depth),
             }
         }
 
@@ -467,24 +457,9 @@ impl<'opts> DomSerializer<'opts> {
             Value::LocalDateTime(dt) => out.push_str(&dt.to_string()),
             Value::LocalDate(d) => out.push_str(&d.to_string()),
             Value::LocalTime(t) => out.push_str(&t.to_string()),
-            Value::Array(arr) => self.write_array(out, arr, depth),
+            Value::Array(arr) => write_array_canonical(out, arr, depth),
             Value::Table(tbl) => write_inline_table_canonical(out, tbl),
         }
-    }
-
-    fn write_array(&self, out: &mut String, arr: &Array, depth: usize) {
-        if arr.is_empty() {
-            out.push_str("[]");
-            return;
-        }
-        out.push('[');
-        for (i, val) in arr.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            self.write_value(out, val, depth);
-        }
-        out.push(']');
     }
 
     fn write_key(&self, out: &mut String, key: &str) {
@@ -507,37 +482,28 @@ impl<'opts> DomSerializer<'opts> {
     }
 
     fn prefer_inline_table(&self, tbl: &Table) -> bool {
-        if self.opts.prefer_inline {
-            return true;
-        }
-        tbl.len() <= 4 && !has_sub_tables(tbl)
+        self.opts.prefer_inline || (tbl.len() <= 4 && !has_sub_tables(tbl))
     }
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn needs_quoting(key: &str) -> bool {
-    if key.is_empty() {
-        return true;
-    }
-    !key.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    key.is_empty()
+        || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn has_sub_tables(tbl: &Table) -> bool {
-    tbl.inner
-        .values()
-        .any(|v| matches!(v, Value::Table(_) | Value::Array(_)))
+    tbl.inner.values().any(|v| matches!(v, Value::Table(_) | Value::Array(_)))
 }
 
 fn is_array_of_tables(arr: &Array) -> bool {
-    arr.iter().all(|v| matches!(v, Value::Table(_))) && !arr.is_empty()
+    !arr.is_empty() && arr.iter().all(|v| matches!(v, Value::Table(_)))
 }
 
 fn key_to_string(key: &str) -> String {
     if needs_quoting(key) {
-        let mut s = String::new();
-        s.push('"');
+        let mut s = String::from('"');
         for ch in key.chars() {
             match ch {
                 '"' => s.push_str("\\\""),

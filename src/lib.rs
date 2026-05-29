@@ -57,7 +57,10 @@ pub mod value;
 mod tests;
 
 // Re-exports for convenient usage
-pub use cst::{DocumentItem, EntryNode, SectionNode};
+pub use cst::{
+    ArrayElement, ArrayNode, DocumentItem, EntryNode, InlineEntry, InlineTableNode, SectionNode,
+    ValueNode,
+};
 pub use datetime::{LocalDate, LocalDateTime, LocalTime, OffsetDateTime};
 pub use document::Document;
 pub use error::{SourceLocation, TomlError, TomlErrorKind};
