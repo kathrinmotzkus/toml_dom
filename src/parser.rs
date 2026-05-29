@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::cst::{DocumentItem, EntryNode, SectionNode};
 use crate::datetime::{LocalDate, LocalDateTime, LocalTime, OffsetDateTime};
 use crate::document::Document;
 use crate::error::{TomlError, TomlErrorKind};
@@ -14,13 +15,9 @@ use crate::value::{Array, Table, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TableStatus {
-    /// Explicitly introduced with `[header]`.
     ExplicitlyDefined,
-    /// Implicitly created via dotted keys or parent tables.
     ImplicitlyCreated,
-    /// Inline table `{…}` – must not be extended afterwards.
     Inline,
-    /// Element of `[[array of tables]]`.
     ArrayElement,
 }
 
@@ -52,27 +49,20 @@ impl ParseContext {
     ) -> Result<(), TomlError> {
         if let Some(existing) = self.known.get(path) {
             match (existing, &status) {
-                // Implicitly created tables can be upgraded to explicitly defined
                 (TableStatus::ImplicitlyCreated, TableStatus::ExplicitlyDefined) => {
                     self.known.insert(path.to_string(), status);
                     return Ok(());
                 }
-                // Array elements can always add new elements (handled elsewhere)
                 (TableStatus::ArrayElement, TableStatus::ArrayElement) => {
                     return Ok(());
                 }
-                // Inline tables can never be re-opened
                 (TableStatus::Inline, _) => {
                     return Err(TomlError::parse(
-                        format!(
-                            "cannot extend inline table '{}' with a table header",
-                            path
-                        ),
+                        format!("cannot extend inline table '{}' with a table header", path),
                         line,
                         col,
                     ));
                 }
-                // Explicitly defined tables cannot be redefined
                 (TableStatus::ExplicitlyDefined, TableStatus::ExplicitlyDefined) => {
                     return Err(TomlError {
                         kind: TomlErrorKind::DuplicateKey,
@@ -160,14 +150,12 @@ impl<'src> Source<'src> {
         }
     }
 
-    /// Skip whitespace (space and tab), but not newlines.
     fn skip_ws(&mut self) {
         while matches!(self.current_byte(), Some(b' ') | Some(b'\t')) {
             self.advance();
         }
     }
 
-    /// Skip whitespace and newlines.
     fn skip_ws_and_newlines(&mut self) {
         loop {
             match self.current_byte() {
@@ -186,7 +174,6 @@ impl<'src> Source<'src> {
         }
     }
 
-    /// Skip a comment (from # to end of line).
     fn skip_comment(&mut self) {
         while !self.is_eof() {
             let b = self.current_byte();
@@ -200,7 +187,6 @@ impl<'src> Source<'src> {
         }
     }
 
-    /// Skip whitespace and optional comment at end of line.
     fn skip_ws_comment(&mut self) {
         self.skip_ws();
         if self.current_byte() == Some(b'#') {
@@ -211,6 +197,23 @@ impl<'src> Source<'src> {
     fn err_here(&self, msg: impl Into<String>) -> TomlError {
         TomlError::parse(msg, self.line, self.col)
     }
+
+    /// Slice of source text consumed since `start`.
+    fn slice_from(&self, start: usize) -> &'src str {
+        &self.src[start..self.pos]
+    }
+}
+
+// ── KeyvalInfo ────────────────────────────────────────────────────────────────
+
+/// Raw-text metadata returned alongside the parsed key-value result.
+struct KeyvalInfo {
+    keys: Vec<String>,
+    is_inline_table: bool,
+    raw_key: String,
+    pre_eq: String,
+    post_eq: String,
+    raw_value: String,
 }
 
 // ── Parser ────────────────────────────────────────────────────────────────────
@@ -239,24 +242,41 @@ impl<'src> Parser<'src> {
     /// integer overflow.
     pub fn parse(mut self) -> Result<Document, TomlError> {
         let mut root = Table::new();
-        self.parse_document(&mut root)?;
-        Ok(Document::from_root(root))
+        let mut items: Vec<DocumentItem> = Vec::new();
+        self.parse_document(&mut root, &mut items)?;
+        Ok(Document::from_parts(root, items))
     }
 
-    fn parse_document(&mut self, root: &mut Table) -> Result<(), TomlError> {
-        let mut current_path: Vec<String> = vec![];
+    fn parse_document(
+        &mut self,
+        root: &mut Table,
+        items: &mut Vec<DocumentItem>,
+    ) -> Result<(), TomlError> {
+        // current_dom_path: used to navigate the DOM tree (no array indices)
+        let mut current_dom_path: Vec<String> = vec![];
+        // current_item_prefix: used to build full entry paths in items
+        // (includes stringified array index for array-of-tables sections)
+        let mut current_item_prefix: Vec<String> = vec![];
+        // tracks how many times each [[array]] header has been seen
+        let mut aot_counts: HashMap<String, usize> = HashMap::new();
 
         loop {
+            // Capture leading trivia (blank lines + comments before next token)
+            let leading_start = self.src.pos;
             self.src.skip_ws_and_newlines();
+            let leading = self.src.slice_from(leading_start).to_string();
+
             if self.src.is_eof() {
+                // Always push Eof so items is non-empty even for empty files.
+                items.push(DocumentItem::Eof(leading));
                 break;
             }
 
             match self.src.current_byte() {
-                // Table header [key] or array header [[key]]
                 Some(b'[') => {
                     if self.src.peek_byte(1) == Some(b'[') {
-                        // Array of tables [[key]]
+                        // ── [[array-of-tables]] ─────────────────────────────
+                        let header_start = self.src.pos;
                         self.src.advance(); // first [
                         self.src.advance(); // second [
                         self.src.skip_ws();
@@ -264,83 +284,168 @@ impl<'src> Parser<'src> {
                         self.src.skip_ws();
                         self.expect_byte(b']', "expected ']]'")?;
                         self.expect_byte(b']', "expected ']]'")?;
+                        let raw = self.src.slice_from(header_start).to_string();
+
+                        let trailing_start = self.src.pos;
                         self.src.skip_ws_comment();
                         self.expect_newline_or_eof()?;
+                        let trailing = self.src.slice_from(trailing_start).to_string();
 
                         let path_str = path.join(".");
-                        // Mark this path as an ArrayElement (or add to existing)
-                        self.ctx.mark(&path_str, TableStatus::ArrayElement, self.src.line, self.src.col)?;
+                        self.ctx.mark(
+                            &path_str,
+                            TableStatus::ArrayElement,
+                            self.src.line,
+                            self.src.col,
+                        )?;
 
-                        // Navigate to (or create) the array at that path
-                        let arr = get_or_create_array_of_tables(root, &path, &mut self.ctx, self.src.line, self.src.col)?;
+                        let arr = get_or_create_array_of_tables(
+                            root,
+                            &path,
+                            &mut self.ctx,
+                            self.src.line,
+                            self.src.col,
+                        )?;
                         arr.0.push(Value::Table(Table::new()));
-                        let last_idx = arr.0.len() - 1;
-                        current_path = path.clone();
 
-                        // We need to navigate to the last element of the array
-                        // and parse key-value pairs into it.
-                        // We'll do this by re-navigating on each key-value parse.
-                        let _ = last_idx; // used below
+                        // Array index for this occurrence (0-based)
+                        let idx = {
+                            let counter = aot_counts.entry(path_str.clone()).or_insert(0);
+                            let i = *counter;
+                            *counter += 1;
+                            i
+                        };
+
+                        current_dom_path = path.clone();
+                        current_item_prefix = {
+                            let mut p = path.clone();
+                            p.push(idx.to_string());
+                            p
+                        };
+
+                        items.push(DocumentItem::Section(SectionNode {
+                            leading,
+                            raw,
+                            trailing,
+                            path,
+                            is_array: true,
+                        }));
                     } else {
-                        // Standard table [key]
+                        // ── [table] ─────────────────────────────────────────
+                        let header_start = self.src.pos;
                         self.src.advance(); // [
                         self.src.skip_ws();
                         let path = self.parse_key()?;
                         self.src.skip_ws();
                         self.expect_byte(b']', "expected ']'")?;
+                        let raw = self.src.slice_from(header_start).to_string();
+
+                        let trailing_start = self.src.pos;
                         self.src.skip_ws_comment();
                         self.expect_newline_or_eof()?;
+                        let trailing = self.src.slice_from(trailing_start).to_string();
 
                         let path_str = path.join(".");
                         let line = self.src.line;
                         let col = self.src.col;
-                        self.ctx.mark(&path_str, TableStatus::ExplicitlyDefined, line, col)?;
-
-                        // Ensure all intermediate tables exist and are valid
+                        self.ctx.mark(
+                            &path_str,
+                            TableStatus::ExplicitlyDefined,
+                            line,
+                            col,
+                        )?;
                         ensure_path_exists(root, &path, &mut self.ctx, line, col)?;
-                        current_path = path;
+
+                        current_dom_path = path.clone();
+                        current_item_prefix = path.clone();
+
+                        items.push(DocumentItem::Section(SectionNode {
+                            leading,
+                            raw,
+                            trailing,
+                            path,
+                            is_array: false,
+                        }));
                     }
                 }
                 _ => {
-                    // Key-value pair
+                    // ── key = value ──────────────────────────────────────────
                     let line = self.src.line;
                     let col = self.src.col;
-                    let target = navigate_to_table_mut(root, &current_path, &mut self.ctx, line, col)?;
-                    let (keys, is_inline_table) = self.parse_keyval(target)?;
-                    // Register inline tables in ctx so they can't be extended by [headers]
-                    if is_inline_table {
-                        let mut full_path = if current_path.is_empty() {
+                    let target = navigate_to_table_mut(
+                        root,
+                        &current_dom_path,
+                        &mut self.ctx,
+                        line,
+                        col,
+                    )?;
+                    let info = self.parse_keyval(target)?;
+
+                    if info.is_inline_table {
+                        let mut full = if current_dom_path.is_empty() {
                             String::new()
                         } else {
-                            current_path.join(".")
+                            current_dom_path.join(".")
                         };
-                        if !full_path.is_empty() {
-                            full_path.push('.');
+                        if !full.is_empty() {
+                            full.push('.');
                         }
-                        full_path.push_str(&keys.join("."));
-                        let _ = self.ctx.mark(&full_path, TableStatus::Inline, line, col);
+                        full.push_str(&info.keys.join("."));
+                        let _ = self.ctx.mark(&full, TableStatus::Inline, line, col);
                     }
+
+                    let trailing_start = self.src.pos;
                     self.src.skip_ws_comment();
                     self.expect_newline_or_eof()?;
+                    let trailing = self.src.slice_from(trailing_start).to_string();
+
+                    // Full items path = section prefix + local key segments
+                    let mut full_path = current_item_prefix.clone();
+                    full_path.extend(info.keys.iter().cloned());
+
+                    items.push(DocumentItem::Entry {
+                        node: EntryNode {
+                            leading,
+                            raw_key: info.raw_key,
+                            pre_eq: info.pre_eq,
+                            post_eq: info.post_eq,
+                            raw_value: Some(info.raw_value),
+                            trailing,
+                        },
+                        path: full_path,
+                    });
                 }
             }
         }
         Ok(())
     }
 
-    /// Parse a key-value pair and insert it into `target`.
-    /// Returns the key path and whether the value was an inline table.
-    fn parse_keyval(&mut self, target: &mut Table) -> Result<(Vec<String>, bool), TomlError> {
+    /// Parse a key-value pair, insert the value into `target`, and return
+    /// both the structural result and the raw source text of each component.
+    fn parse_keyval(&mut self, target: &mut Table) -> Result<KeyvalInfo, TomlError> {
         let line = self.src.line;
         let col = self.src.col;
+
+        let key_start = self.src.pos;
         let keys = self.parse_key()?;
+        let raw_key = self.src.slice_from(key_start).to_string();
+
+        let pre_eq_start = self.src.pos;
         self.src.skip_ws();
+        let pre_eq = self.src.slice_from(pre_eq_start).to_string();
+
         self.expect_byte(b'=', "expected '='")?;
+
+        let post_eq_start = self.src.pos;
         self.src.skip_ws();
+        let post_eq = self.src.slice_from(post_eq_start).to_string();
+
+        let val_start = self.src.pos;
         let value = self.parse_val()?;
+        let raw_value = self.src.slice_from(val_start).to_string();
+
         let is_inline_table = matches!(value, Value::Table(_));
 
-        // Insert with dotted key support
         if keys.len() == 1 {
             if target.contains_key(&keys[0]) {
                 return Err(TomlError {
@@ -355,12 +460,9 @@ impl<'src> Parser<'src> {
             }
             target.inner.insert(keys[0].clone(), value);
         } else {
-            // Dotted key: a.b.c = value
-            // Navigate intermediate keys, creating implicit tables
             let mut current = target;
             for (i, key) in keys.iter().enumerate() {
                 if i == keys.len() - 1 {
-                    // Last key: insert value
                     if current.contains_key(key) {
                         return Err(TomlError {
                             kind: TomlErrorKind::DuplicateKey,
@@ -375,7 +477,6 @@ impl<'src> Parser<'src> {
                     current.inner.insert(key.clone(), value);
                     break;
                 } else {
-                    // Intermediate key: navigate or create implicit table
                     let entry = current
                         .inner
                         .entry(key.clone())
@@ -393,7 +494,15 @@ impl<'src> Parser<'src> {
                 }
             }
         }
-        Ok((keys, is_inline_table))
+
+        Ok(KeyvalInfo {
+            keys,
+            is_inline_table,
+            raw_key,
+            pre_eq,
+            post_eq,
+            raw_value,
+        })
     }
 
     fn parse_key(&mut self) -> Result<Vec<String>, TomlError> {
@@ -471,7 +580,6 @@ impl<'src> Parser<'src> {
                 Ok(Value::Table(tbl))
             }
             Some(b'i') => {
-                // inf
                 if self.src.remaining().starts_with("inf") {
                     self.src.advance_bytes(3);
                     Ok(Value::Float(f64::INFINITY))
@@ -480,7 +588,6 @@ impl<'src> Parser<'src> {
                 }
             }
             Some(b'n') => {
-                // nan
                 if self.src.remaining().starts_with("nan") {
                     self.src.advance_bytes(3);
                     Ok(Value::Float(f64::NAN))
@@ -489,7 +596,6 @@ impl<'src> Parser<'src> {
                 }
             }
             Some(b'+') | Some(b'-') => {
-                // Could be number or +inf/-inf/+nan/-nan
                 let sign = self.src.current_byte().unwrap() as char;
                 self.src.advance();
                 if self.src.remaining().starts_with("inf") {
@@ -504,8 +610,7 @@ impl<'src> Parser<'src> {
                     self.src.advance_bytes(3);
                     return Ok(Value::Float(f64::NAN));
                 }
-                // Back to number parsing with sign
-                let start = self.src.pos - 1; // include sign
+                let start = self.src.pos - 1;
                 self.parse_number_from(start, sign == '-')
             }
             Some(b) if b.is_ascii_digit() => {
@@ -517,32 +622,20 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_number_from(&mut self, start: usize, negated: bool) -> Result<Value, TomlError> {
-        // We may have already consumed the sign; start is the position before the sign (or at digit)
-        // Re-read from start
-        let _remaining = &self.src.src[start..];
         let line = self.src.line;
         let col = self.src.col;
-
-        // Collect all characters that can form a number or datetime
-        let end = self.src.pos;
-        let _ = end;
         let _ = negated;
-
-        // We need to scan forward to find the end of the token
-        // Collect from start
         let tok_start = start;
-        // Move src.pos back to start to re-scan
-        // Actually we need to be smarter here.
-        // Let's scan forward from current pos to find the full token.
-        // The sign was already consumed if present.
         let after_sign_pos = self.src.pos;
 
-        // Check for radix prefixes: 0x, 0o, 0b
         if self.src.remaining().starts_with("0x") {
-            self.src.advance(); // 0
-            self.src.advance(); // x
+            self.src.advance();
+            self.src.advance();
             let digit_start = self.src.pos;
-            while self.src.current_byte().map_or(false, |b| b.is_ascii_hexdigit() || b == b'_') {
+            while self.src
+                .current_byte()
+                .map_or(false, |b| b.is_ascii_hexdigit() || b == b'_')
+            {
                 self.src.advance();
             }
             let digits = self.src.src[digit_start..self.src.pos]
@@ -552,35 +645,42 @@ impl<'src> Parser<'src> {
             if digits.is_empty() {
                 return Err(TomlError::parse("empty hex integer", line, col));
             }
-            let val = u64::from_str_radix(&digits, 16).map_err(|_| {
-                TomlError::integer_overflow("integer overflow (hex)", line, col)
-            })?;
-            // Check sign
+            let val = u64::from_str_radix(&digits, 16)
+                .map_err(|_| TomlError::integer_overflow("integer overflow (hex)", line, col))?;
             let full = &self.src.src[tok_start..self.src.pos];
             let negative = full.starts_with('-');
             if negative {
-                // val <= 2^63  (i64::MIN = -2^63, abs = 0x8000000000000000)
                 if val > 0x8000_0000_0000_0000u64 {
-                    return Err(TomlError::integer_overflow("integer overflow (hex negative)", line, col));
+                    return Err(TomlError::integer_overflow(
+                        "integer overflow (hex negative)",
+                        line,
+                        col,
+                    ));
                 }
-                // Special case: 0x8000000000000000 == i64::MIN magnitude (no overflow)
                 if val == 0x8000_0000_0000_0000u64 {
                     return Ok(Value::Integer(i64::MIN));
                 }
                 return Ok(Value::Integer(-(val as i64)));
             } else {
                 if val > i64::MAX as u64 {
-                    return Err(TomlError::integer_overflow("integer overflow (hex)", line, col));
+                    return Err(TomlError::integer_overflow(
+                        "integer overflow (hex)",
+                        line,
+                        col,
+                    ));
                 }
                 return Ok(Value::Integer(val as i64));
             }
         }
 
         if self.src.remaining().starts_with("0o") {
-            self.src.advance(); // 0
-            self.src.advance(); // o
+            self.src.advance();
+            self.src.advance();
             let digit_start = self.src.pos;
-            while self.src.current_byte().map_or(false, |b| matches!(b, b'0'..=b'7') || b == b'_') {
+            while self.src
+                .current_byte()
+                .map_or(false, |b| matches!(b, b'0'..=b'7') || b == b'_')
+            {
                 self.src.advance();
             }
             let digits = self.src.src[digit_start..self.src.pos]
@@ -597,7 +697,11 @@ impl<'src> Parser<'src> {
             let negative = full.starts_with('-');
             if negative {
                 if val > 0x8000_0000_0000_0000u64 {
-                    return Err(TomlError::integer_overflow("integer overflow (octal negative)", line, col));
+                    return Err(TomlError::integer_overflow(
+                        "integer overflow (octal negative)",
+                        line,
+                        col,
+                    ));
                 }
                 if val == 0x8000_0000_0000_0000u64 {
                     return Ok(Value::Integer(i64::MIN));
@@ -605,17 +709,24 @@ impl<'src> Parser<'src> {
                 return Ok(Value::Integer(-(val as i64)));
             } else {
                 if val > i64::MAX as u64 {
-                    return Err(TomlError::integer_overflow("integer overflow (octal)", line, col));
+                    return Err(TomlError::integer_overflow(
+                        "integer overflow (octal)",
+                        line,
+                        col,
+                    ));
                 }
                 return Ok(Value::Integer(val as i64));
             }
         }
 
         if self.src.remaining().starts_with("0b") {
-            self.src.advance(); // 0
-            self.src.advance(); // b
+            self.src.advance();
+            self.src.advance();
             let digit_start = self.src.pos;
-            while self.src.current_byte().map_or(false, |b| matches!(b, b'0' | b'1') || b == b'_') {
+            while self.src
+                .current_byte()
+                .map_or(false, |b| matches!(b, b'0' | b'1') || b == b'_')
+            {
                 self.src.advance();
             }
             let digits = self.src.src[digit_start..self.src.pos]
@@ -632,7 +743,11 @@ impl<'src> Parser<'src> {
             let negative = full.starts_with('-');
             if negative {
                 if val > 0x8000_0000_0000_0000u64 {
-                    return Err(TomlError::integer_overflow("integer overflow (binary negative)", line, col));
+                    return Err(TomlError::integer_overflow(
+                        "integer overflow (binary negative)",
+                        line,
+                        col,
+                    ));
                 }
                 if val == 0x8000_0000_0000_0000u64 {
                     return Ok(Value::Integer(i64::MIN));
@@ -640,27 +755,35 @@ impl<'src> Parser<'src> {
                 return Ok(Value::Integer(-(val as i64)));
             } else {
                 if val > i64::MAX as u64 {
-                    return Err(TomlError::integer_overflow("integer overflow (binary)", line, col));
+                    return Err(TomlError::integer_overflow(
+                        "integer overflow (binary)",
+                        line,
+                        col,
+                    ));
                 }
                 return Ok(Value::Integer(val as i64));
             }
         }
 
-        // Decimal integer or float or datetime
-        // Scan digits
-        let num_start = self.src.pos;
-
-        // Scan digits, dots, colons, dashes, underscores, e, E, +, -, T, t, Z, z
+        // Decimal integer, float, or datetime
         while let Some(b) = self.src.current_byte() {
             match b {
-                b'0'..=b'9' | b'.' | b'e' | b'E' | b'_' | b':' | b'-' | b'+' | b'T' | b't' | b'Z' | b'z' | b' ' => {
-                    // Space can be datetime delimiter
+                b'0'..=b'9'
+                | b'.'
+                | b'e'
+                | b'E'
+                | b'_'
+                | b':'
+                | b'-'
+                | b'+'
+                | b'T'
+                | b't'
+                | b'Z'
+                | b'z'
+                | b' ' => {
                     if b == b' ' {
-                        // Only allow one space as delimiter between date and time
-                        // Check if it looks like a datetime (if we have a date pattern so far)
                         let so_far = &self.src.src[after_sign_pos..self.src.pos];
                         if looks_like_date(so_far) {
-                            // Check next byte
                             if let Some(next) = self.src.peek_byte(1) {
                                 if next.is_ascii_digit() {
                                     self.src.advance();
@@ -678,17 +801,13 @@ impl<'src> Parser<'src> {
 
         let token_str = &self.src.src[tok_start..self.src.pos];
 
-        // Try datetime first
         if let Some(v) = try_parse_datetime(token_str, line, col)? {
             return Ok(v);
         }
 
-        // Try float
-        let clean_no_sign = &self.src.src[after_sign_pos..self.src.pos];
-        let clean = clean_no_sign.replace('_', "");
         let signed = token_str.replace('_', "");
 
-        if signed.contains('.') || (signed.contains('e') || signed.contains('E'))
+        if (signed.contains('.') || signed.contains('e') || signed.contains('E'))
             && !signed.starts_with("0x")
             && !signed.starts_with("0o")
             && !signed.starts_with("0b")
@@ -699,11 +818,7 @@ impl<'src> Parser<'src> {
             return Ok(Value::Float(f));
         }
 
-        // Integer decimal
-        let _ = clean;
         let signed_clean = token_str.replace('_', "");
-
-        // Must only contain digits (and optional leading sign)
         let digit_part = signed_clean.trim_start_matches(['+', '-']);
         if !digit_part.chars().all(|c| c.is_ascii_digit()) {
             return Err(TomlError::parse(
@@ -720,10 +835,6 @@ impl<'src> Parser<'src> {
                 col,
             )
         })?;
-
-        // Verify with checked arithmetic for overflow
-        let num_start_str = &self.src.src[num_start..self.src.pos];
-        let _ = num_start_str;
 
         Ok(Value::Integer(val))
     }
@@ -762,11 +873,9 @@ impl<'src> Parser<'src> {
     fn parse_ml_basic_string(&mut self) -> Result<String, TomlError> {
         let line = self.src.line;
         let col = self.src.col;
-        // Consume opening """
         self.expect_byte(b'"', "expected '\"'")?;
         self.expect_byte(b'"', "expected '\"'")?;
         self.expect_byte(b'"', "expected '\"'")?;
-        // Skip optional immediate newline
         if self.src.current_byte() == Some(b'\n') {
             self.src.advance();
         } else if self.src.current_byte() == Some(b'\r')
@@ -780,13 +889,10 @@ impl<'src> Parser<'src> {
             match self.src.current_byte() {
                 None => return Err(TomlError::parse("unterminated multiline string", line, col)),
                 Some(b'"') => {
-                    // Check for closing """
                     if self.src.peek_byte(1) == Some(b'"') && self.src.peek_byte(2) == Some(b'"') {
-                        // But it could be """"" (5 quotes) = 2 literal + closing 3
                         self.src.advance();
                         self.src.advance();
                         self.src.advance();
-                        // Check for extra quotes (up to 2 allowed)
                         let mut extra = 0;
                         while self.src.current_byte() == Some(b'"') && extra < 2 {
                             result.push('"');
@@ -801,7 +907,6 @@ impl<'src> Parser<'src> {
                 }
                 Some(b'\\') => {
                     self.src.advance();
-                    // Line ending backslash: skip whitespace/newlines
                     if self.src.current_byte() == Some(b'\n')
                         || (self.src.current_byte() == Some(b'\r')
                             && self.src.peek_byte(1) == Some(b'\n'))
@@ -809,7 +914,7 @@ impl<'src> Parser<'src> {
                         if self.src.current_byte() == Some(b'\r') {
                             self.src.advance();
                         }
-                        self.src.advance(); // \n
+                        self.src.advance();
                         while matches!(
                             self.src.current_byte(),
                             Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
@@ -861,11 +966,9 @@ impl<'src> Parser<'src> {
     fn parse_ml_literal_string(&mut self) -> Result<String, TomlError> {
         let line = self.src.line;
         let col = self.src.col;
-        // Consume opening '''
         self.expect_byte(b'\'', "expected \"'\"")?;
         self.expect_byte(b'\'', "expected \"'\"")?;
         self.expect_byte(b'\'', "expected \"'\"")?;
-        // Skip optional immediate newline
         if self.src.current_byte() == Some(b'\n') {
             self.src.advance();
         } else if self.src.current_byte() == Some(b'\r')
@@ -877,13 +980,19 @@ impl<'src> Parser<'src> {
         let mut result = String::new();
         loop {
             match self.src.current_byte() {
-                None => return Err(TomlError::parse("unterminated multiline literal string", line, col)),
+                None => {
+                    return Err(TomlError::parse(
+                        "unterminated multiline literal string",
+                        line,
+                        col,
+                    ))
+                }
                 Some(b'\'') => {
-                    if self.src.peek_byte(1) == Some(b'\'') && self.src.peek_byte(2) == Some(b'\'') {
+                    if self.src.peek_byte(1) == Some(b'\'') && self.src.peek_byte(2) == Some(b'\'')
+                    {
                         self.src.advance();
                         self.src.advance();
                         self.src.advance();
-                        // Extra quotes
                         let mut extra = 0;
                         while self.src.current_byte() == Some(b'\'') && extra < 2 {
                             result.push('\'');
@@ -911,34 +1020,51 @@ impl<'src> Parser<'src> {
         let line = self.src.line;
         let col = self.src.col;
         match self.src.current_byte() {
-            Some(b'b') => { self.src.advance(); Ok("\x08".to_string()) }
-            Some(b't') => { self.src.advance(); Ok("\t".to_string()) }
-            Some(b'n') => { self.src.advance(); Ok("\n".to_string()) }
-            Some(b'f') => { self.src.advance(); Ok("\x0C".to_string()) }
-            Some(b'r') => { self.src.advance(); Ok("\r".to_string()) }
-            Some(b'"') => { self.src.advance(); Ok("\"".to_string()) }
-            Some(b'\\') => { self.src.advance(); Ok("\\".to_string()) }
+            Some(b'b') => {
+                self.src.advance();
+                Ok("\x08".to_string())
+            }
+            Some(b't') => {
+                self.src.advance();
+                Ok("\t".to_string())
+            }
+            Some(b'n') => {
+                self.src.advance();
+                Ok("\n".to_string())
+            }
+            Some(b'f') => {
+                self.src.advance();
+                Ok("\x0C".to_string())
+            }
+            Some(b'r') => {
+                self.src.advance();
+                Ok("\r".to_string())
+            }
+            Some(b'"') => {
+                self.src.advance();
+                Ok("\"".to_string())
+            }
+            Some(b'\\') => {
+                self.src.advance();
+                Ok("\\".to_string())
+            }
             Some(b'e') => {
-                // TOML 1.1: \e = ESC = U+001B
                 self.src.advance();
                 Ok("\x1B".to_string())
             }
             Some(b'x') => {
-                // TOML 1.1: \xHH
                 self.src.advance();
                 let h1 = self.read_hex_digit()?;
                 let h2 = self.read_hex_digit()?;
                 let code = (h1 << 4) | h2;
-                let ch = char::from_u32(code as u32).ok_or_else(|| {
-                    TomlError {
-                        kind: TomlErrorKind::InvalidEscape(format!("\\x{:02x}", code)),
-                        message: format!("invalid \\x escape: {:02x}", code),
-                        location: Some(crate::error::SourceLocation {
-                            line,
-                            column: col,
-                            source_file: None,
-                        }),
-                    }
+                let ch = char::from_u32(code as u32).ok_or_else(|| TomlError {
+                    kind: TomlErrorKind::InvalidEscape(format!("\\x{:02x}", code)),
+                    message: format!("invalid \\x escape: {:02x}", code),
+                    location: Some(crate::error::SourceLocation {
+                        line,
+                        column: col,
+                        source_file: None,
+                    }),
                 })?;
                 Ok(ch.to_string())
             }
@@ -979,19 +1105,28 @@ impl<'src> Parser<'src> {
                     source_file: None,
                 }),
             }),
-            None => Err(TomlError::parse("unexpected EOF in escape sequence", line, col)),
+            None => Err(TomlError::parse(
+                "unexpected EOF in escape sequence",
+                line,
+                col,
+            )),
         }
     }
 
     fn read_hex_digit(&mut self) -> Result<u8, TomlError> {
-        let b = self.src.current_byte().ok_or_else(|| {
-            self.src.err_here("expected hex digit")
-        })?;
+        let b = self
+            .src
+            .current_byte()
+            .ok_or_else(|| self.src.err_here("expected hex digit"))?;
         let val = match b {
             b'0'..=b'9' => b - b'0',
             b'a'..=b'f' => b - b'a' + 10,
             b'A'..=b'F' => b - b'A' + 10,
-            _ => return Err(self.src.err_here(format!("expected hex digit, got '{}'", b as char))),
+            _ => {
+                return Err(self
+                    .src
+                    .err_here(format!("expected hex digit, got '{}'", b as char)))
+            }
         };
         self.src.advance();
         Ok(val)
@@ -1011,7 +1146,6 @@ impl<'src> Parser<'src> {
         self.expect_byte(b'[', "expected '['")?;
         let mut arr = Array::new();
         loop {
-            // Skip whitespace, newlines, and comments
             self.skip_ws_nl_comments();
             if self.src.current_byte() == Some(b']') {
                 self.src.advance();
@@ -1026,14 +1160,17 @@ impl<'src> Parser<'src> {
             match self.src.current_byte() {
                 Some(b',') => {
                     self.src.advance();
-                    // Trailing comma: after comma, skip to ]
                 }
                 Some(b']') => {
                     self.src.advance();
                     break;
                 }
                 _ => {
-                    return Err(TomlError::parse("expected ',' or ']' in array", self.src.line, self.src.col));
+                    return Err(TomlError::parse(
+                        "expected ',' or ']' in array",
+                        self.src.line,
+                        self.src.col,
+                    ));
                 }
             }
         }
@@ -1045,7 +1182,6 @@ impl<'src> Parser<'src> {
         let col = self.src.col;
         self.expect_byte(b'{', "expected '{'")?;
         let mut tbl = Table::new();
-        // TOML 1.1: newlines are allowed inside inline tables
         self.skip_ws_nl_comments();
         if self.src.current_byte() == Some(b'}') {
             self.src.advance();
@@ -1063,12 +1199,11 @@ impl<'src> Parser<'src> {
                 self.src.advance();
                 break;
             }
-            let _ = self.parse_keyval(&mut tbl)?; // ignore return value for inline tables
+            let _ = self.parse_keyval(&mut tbl)?;
             self.skip_ws_nl_comments();
             match self.src.current_byte() {
                 Some(b',') => {
                     self.src.advance();
-                    // TOML 1.1: trailing comma allowed
                     self.skip_ws_nl_comments();
                     if self.src.current_byte() == Some(b'}') {
                         self.src.advance();
@@ -1135,6 +1270,13 @@ impl<'src> Parser<'src> {
     }
 }
 
+// ── Public entry point ────────────────────────────────────────────────────────
+
+/// Parse `src` and return a [`Document`].
+pub fn parse(src: &str) -> Result<Document, TomlError> {
+    Parser::new(src).parse()
+}
+
 // ── Helper functions ──────────────────────────────────────────────────────────
 
 fn is_bare_key_char(b: u8) -> bool {
@@ -1142,7 +1284,6 @@ fn is_bare_key_char(b: u8) -> bool {
 }
 
 fn looks_like_date(s: &str) -> bool {
-    // Check if s matches YYYY-MM-DD
     if s.len() < 10 {
         return false;
     }
@@ -1150,21 +1291,17 @@ fn looks_like_date(s: &str) -> bool {
     bytes[4] == b'-' && bytes[7] == b'-'
 }
 
-/// Try to parse a datetime token. Returns Ok(None) if not a datetime.
 fn try_parse_datetime(s: &str, line: u32, col: u32) -> Result<Option<Value>, TomlError> {
     let bytes = s.as_bytes();
 
-    // Check HH:MM pattern (local time) FIRST — before the length >= 10 check
-    // A local time starts with HH:MM which is only 5 chars
     let is_time = s.len() >= 5
         && bytes[0].is_ascii_digit()
         && bytes[1].is_ascii_digit()
         && bytes[2] == b':'
         && bytes[3].is_ascii_digit()
         && bytes[4].is_ascii_digit()
-        && (s.len() < 10 || bytes[4] != b'-'); // distinguish from date
+        && (s.len() < 10 || bytes[4] != b'-');
 
-    // Check YYYY-MM-DD pattern
     let is_date = s.len() >= 10
         && bytes[0].is_ascii_digit()
         && bytes[1].is_ascii_digit()
@@ -1192,7 +1329,6 @@ fn try_parse_datetime(s: &str, line: u32, col: u32) -> Result<Option<Value>, Tom
         return Ok(Some(Value::LocalDate(date)));
     }
 
-    // Delimiter: T, t, or space
     let delim = bytes[10];
     if delim != b'T' && delim != b't' && delim != b' ' {
         return Ok(Some(Value::LocalDate(date)));
@@ -1246,7 +1382,7 @@ fn parse_time_str(s: &str, line: u32, col: u32) -> Result<LocalTime, TomlError> 
         });
     }
 
-    // A ':' at position 5 was found, so seconds must follow — need at least HH:MM:SS (8 bytes)
+    // A ':' at position 5 was found — need at least HH:MM:SS (8 bytes)
     if bytes.len() < 8 {
         return Err(TomlError::parse(
             "invalid time: seconds field incomplete after ':'",
@@ -1271,12 +1407,10 @@ fn parse_time_str(s: &str, line: u32, col: u32) -> Result<LocalTime, TomlError> 
 }
 
 fn parse_fractional_seconds(s: &str, _line: u32, _col: u32) -> Result<u32, TomlError> {
-    // s is the fractional part (digits only, possibly with offset suffix)
     let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return Ok(0);
     }
-    // Pad or truncate to 9 digits
     let padded = if digits.len() >= 9 {
         digits[..9].to_string()
     } else {
@@ -1287,13 +1421,11 @@ fn parse_fractional_seconds(s: &str, _line: u32, _col: u32) -> Result<u32, TomlE
 }
 
 fn split_time_offset(s: &str) -> (&str, Option<&str>) {
-    // Find Z, z, +, - that marks the offset
     let bytes = s.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         match b {
             b'Z' | b'z' => return (&s[..i], Some(&s[i..])),
             b'+' | b'-' if i > 0 => {
-                // Ensure it's not the sign for exponent in a float
                 return (&s[..i], Some(&s[i..]));
             }
             _ => {}
@@ -1325,13 +1457,10 @@ fn parse_offset(s: &str, line: u32, col: u32) -> Result<i32, TomlError> {
 }
 
 fn parse_digits(s: &str, line: u32, col: u32) -> Result<u64, TomlError> {
-    s.parse::<u64>().map_err(|_| {
-        TomlError::parse(format!("invalid digits: '{}'", s), line, col)
-    })
+    s.parse::<u64>()
+        .map_err(|_| TomlError::parse(format!("invalid digits: '{}'", s), line, col))
 }
 
-/// Navigate to the table at `path` within `root`, creating tables as needed.
-/// Errors if a non-table or inline-table is encountered.
 fn navigate_to_table_mut<'a>(
     root: &'a mut Table,
     path: &[String],
@@ -1354,7 +1483,6 @@ fn navigate_to_table_mut<'a>(
         match entry {
             Value::Table(t) => current = t,
             Value::Array(arr) => {
-                // Navigate to last element (for array-of-tables)
                 if let Some(Value::Table(t)) = arr.0.last_mut() {
                     current = t;
                 } else {
@@ -1386,7 +1514,6 @@ fn navigate_to_table_mut<'a>(
     Ok(current)
 }
 
-/// Ensure intermediate tables exist along `path`, marking them as implicit.
 fn ensure_path_exists(
     root: &mut Table,
     path: &[String],
@@ -1398,7 +1525,6 @@ fn ensure_path_exists(
     for (i, key) in path.iter().enumerate() {
         let partial_path = path[..=i].join(".");
 
-        // Check for inline table conflict
         if let Some(TableStatus::Inline) = ctx.get_status(&partial_path) {
             return Err(TomlError::parse(
                 format!("cannot extend inline table '{}'", partial_path),
@@ -1407,20 +1533,17 @@ fn ensure_path_exists(
             ));
         }
 
-        let entry = current
-            .inner
-            .entry(key.clone())
-            .or_insert_with(|| {
-                if !ctx.is_known(&partial_path) {
-                    ctx.known.insert(partial_path.clone(), TableStatus::ImplicitlyCreated);
-                }
-                Value::Table(Table::new())
-            });
+        let entry = current.inner.entry(key.clone()).or_insert_with(|| {
+            if !ctx.is_known(&partial_path) {
+                ctx.known
+                    .insert(partial_path.clone(), TableStatus::ImplicitlyCreated);
+            }
+            Value::Table(Table::new())
+        });
 
         match entry {
             Value::Table(t) => current = t,
             Value::Array(arr) => {
-                // Navigate to last element for array-of-tables
                 if let Some(Value::Table(t)) = arr.0.last_mut() {
                     current = t;
                 } else {
@@ -1447,7 +1570,6 @@ fn ensure_path_exists(
     Ok(())
 }
 
-/// Navigate to (or create) an Array for array-of-tables at `path`.
 fn get_or_create_array_of_tables<'a>(
     root: &'a mut Table,
     path: &[String],
@@ -1472,15 +1594,13 @@ fn get_or_create_array_of_tables<'a>(
             ));
         }
 
-        let entry = current
-            .inner
-            .entry(key.clone())
-            .or_insert_with(|| {
-                if !ctx.is_known(&partial) {
-                    ctx.known.insert(partial.clone(), TableStatus::ImplicitlyCreated);
-                }
-                Value::Table(Table::new())
-            });
+        let entry = current.inner.entry(key.clone()).or_insert_with(|| {
+            if !ctx.is_known(&partial) {
+                ctx.known
+                    .insert(partial.clone(), TableStatus::ImplicitlyCreated);
+            }
+            Value::Table(Table::new())
+        });
 
         match entry {
             Value::Table(t) => current = t,
@@ -1489,7 +1609,7 @@ fn get_or_create_array_of_tables<'a>(
                     current = t;
                 } else {
                     return Err(TomlError::parse(
-                        format!("path component '{}' is not navigable", key),
+                        format!("cannot navigate array '{}' (not array of tables)", key),
                         line,
                         col,
                     ));
@@ -1497,7 +1617,7 @@ fn get_or_create_array_of_tables<'a>(
             }
             _ => {
                 return Err(TomlError::parse(
-                    format!("'{}' is not a table", key),
+                    format!("key '{}' is not a table", key),
                     line,
                     col,
                 ));
@@ -1506,38 +1626,30 @@ fn get_or_create_array_of_tables<'a>(
     }
 
     let last_key = &path[path.len() - 1];
-    let full_path = path.join(".");
+    let last_partial = path.join(".");
 
-    // Check for conflicts (without returning a borrow from the if-let block)
-    let needs_insert = match current.inner.get(last_key.as_str()) {
-        Some(Value::Array(_)) => false,  // already exists as array, just return it
-        Some(_) => {
-            return Err(TomlError {
-                kind: TomlErrorKind::DuplicateKey,
-                message: format!("'{}' is not an array", full_path),
-                location: Some(crate::error::SourceLocation {
-                    line,
-                    column: col,
-                    source_file: None,
-                }),
-            });
+    if let Some(TableStatus::Inline) = ctx.get_status(&last_partial) {
+        return Err(TomlError::parse(
+            format!("cannot extend inline table '{}'", last_partial),
+            line,
+            col,
+        ));
+    }
+
+    let entry = current.inner.entry(last_key.clone()).or_insert_with(|| {
+        if !ctx.is_known(&last_partial) {
+            ctx.known
+                .insert(last_partial.clone(), TableStatus::ImplicitlyCreated);
         }
-        None => true,
-    };
+        Value::Array(Array::new())
+    });
 
-    if needs_insert {
-        current
-            .inner
-            .insert(last_key.clone(), Value::Array(Array::new()));
+    match entry {
+        Value::Array(arr) => Ok(arr),
+        _ => Err(TomlError::parse(
+            format!("key '{}' is not an array", last_key),
+            line,
+            col,
+        )),
     }
-
-    match current.inner.get_mut(last_key.as_str()) {
-        Some(Value::Array(arr)) => Ok(arr),
-        _ => unreachable!(),
-    }
-}
-
-/// Public parse entry point.
-pub fn parse(src: &str) -> Result<Document, TomlError> {
-    Parser::new(src).parse()
 }

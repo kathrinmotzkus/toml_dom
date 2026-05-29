@@ -5,7 +5,10 @@
 //! This crate implements the [TOML 1.1](https://toml.io/en/v1.1.0) specification.
 //! It supports all value types, inline tables with trailing commas and newlines,
 //! the `\e` and `\xHH` escape sequences, optional seconds in datetime/time values,
-//! precise error messages with line/column information, and round-trip serialization.
+//! precise error messages with line/column information, and **format-preserving**
+//! round-trip serialization: comments, string quoting style, number radix and
+//! underscores, blank lines, and inline vs. block table style are all reproduced
+//! exactly when a parsed document is serialized without modifications.
 //!
 //! # Quick start
 //!
@@ -42,6 +45,7 @@
 
 #![warn(missing_docs)]
 
+pub mod cst;
 pub mod datetime;
 pub mod document;
 pub mod error;
@@ -53,6 +57,7 @@ pub mod value;
 mod tests;
 
 // Re-exports for convenient usage
+pub use cst::{DocumentItem, EntryNode, SectionNode};
 pub use datetime::{LocalDate, LocalDateTime, LocalTime, OffsetDateTime};
 pub use document::Document;
 pub use error::{SourceLocation, TomlError, TomlErrorKind};

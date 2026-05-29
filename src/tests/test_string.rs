@@ -74,7 +74,7 @@ fn test_string_multiline_literal() {
 
 #[test]
 fn test_string_empty_basic() {
-    let doc = Document::parse(r#"s = """#).unwrap_or_else(|_| {
+    let _doc = Document::parse(r#"s = """#).unwrap_or_else(|_| {
         Document::parse("s = \"\"\n").unwrap()
     });
     // Either form should parse to empty string

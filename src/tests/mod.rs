@@ -5,3 +5,4 @@ mod test_float;
 mod test_table;
 mod test_serializer;
 mod test_roundtrip;
+mod test_format_preserve;
